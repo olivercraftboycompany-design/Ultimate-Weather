@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>NEXUS Ultimate | Weather Dashboard</title>
+<meta name="description" content="NEXUS Ultimate: live weather, gauges, radar, 14-day forecast, AI assistant, air quality, marine, storm center, space weather, aviation and soil data.">
+<meta property="og:title" content="NEXUS Ultimate | Weather Dashboard">
+<meta property="og:description" content="Every feature from four weather sites in one dashboard. Gauges, live radar, AI assistant and more.">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ccircle cx=%2250%22 cy=%2250%22 r=%2246%22 fill=%22%233b82f6%22/%3E%3Cpath d=%22M50 18 L62 50 L50 82 L38 50Z%22 fill=%22white%22/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="antialiased selection:bg-blue-500/30">
+
+<header class="sticky top-0 z-[1000] bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-800/50 px-4 md:px-6 py-3 navbar">
+  <div class="max-w-7xl mx-auto flex flex-col lg:flex-row justify-between items-center gap-3">
+    <div class="flex items-center justify-between w-full lg:w-auto">
+      <a href="./" class="flex items-center gap-2" aria-label="NEXUS Ultimate home">
+        <i class="ph-fill ph-compass text-3xl text-blue-500"></i>
+        <span class="text-xl font-bold tracking-widest text-zinc-100 brand">NEXUS</span>
+        <span class="text-[10px] font-bold tracking-widest text-blue-400 border border-blue-500/30 bg-blue-500/10 px-1.5 py-0.5 rounded-md">ULTIMATE</span>
+      </a>
+      <div class="flex items-center gap-2 lg:hidden">
+        <span id="liveDotM" class="live-dot" title="Live"></span>
+      </div>
+    </div>
+
+    <div class="flex flex-col sm:flex-row items-center gap-2 w-full lg:w-auto">
+      <div class="relative w-full sm:w-80">
+        <i class="ph ph-magnifying-glass absolute left-4 top-1/2 -translate-y-1/2 text-zinc-400"></i>
+        <label for="searchInput" class="sr-only">Search city or ZIP</label>
+        <input type="search" id="searchInput" placeholder="Search city or ZIP..." autocomplete="off" enterkeyhint="search"
+          class="w-full pl-11 pr-4 py-2.5 bg-zinc-900 border border-zinc-800 rounded-full text-base sm:text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 smooth-transition">
+        <div id="searchResults" role="listbox" class="absolute top-full left-0 right-0 mt-2 bg-zinc-800 border border-zinc-700 rounded-2xl hidden flex-col gap-1 p-2 max-h-72 overflow-y-auto z-50 shadow-2xl"></div>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap justify-center">
+        <button id="gpsBtn" class="icon-btn" title="Use my location" aria-label="Use my location"><i class="ph ph-navigation-arrow text-xl"></i></button>
+        <div class="unit-toggle" id="unitToggle" role="switch" tabindex="0" aria-label="Toggle °F / °C" title="Toggle °F / °C">
+          <span>°F</span><span>°C</span><div id="unitIndicator"></div>
+        </div>
+        <label for="modelSelect" class="sr-only">Forecast model</label>
+        <select id="modelSelect" class="model-select" title="Forecast model">
+          <option value="best_match">Best Match</option>
+          <option value="ecmwf_ifs025">ECMWF</option>
+          <option value="gfs_seamless">GFS</option>
+          <option value="icon_seamless">ICON</option>
+          <option value="jma_seamless">JMA</option>
+        </select>
+        <button id="themeBtn" class="icon-btn" title="Light / dark mode" aria-label="Toggle light or dark mode"><i class="ph ph-moon text-xl"></i></button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-3 md:px-4 py-5 md:py-8 flex flex-col gap-6 md:gap-8">
+
+  <div class="flex items-center gap-2 overflow-x-auto hide-scrollbar pb-1" id="savedRow">
+    <span class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mr-1 shrink-0"><i class="ph ph-bookmark-simple mr-1"></i>Saved</span>
+    <div id="savedChips" class="flex items-center gap-2"></div>
+    <button id="saveBtn" class="chip-btn shrink-0"><i class="ph ph-plus"></i> Save</button>
+    <span class="flex-1"></span>
+    <button id="shareBtn" class="chip-btn shrink-0" title="Copy a shareable link"><i class="ph ph-share-network"></i> Share</button>
+    <button id="exportBtn" class="chip-btn shrink-0" title="Download data"><i class="ph ph-download-simple"></i> Export</button>
+  </div>
+
+  <div id="loadingOverlay" class="flex flex-col items-center justify-center py-32">
+    <div class="loader mb-4"></div>
+    <p class="text-zinc-400 font-medium animate-pulse" id="loadingText">Finding your location...</p>
+  </div>
+
+  <div id="weatherContent" class="hidden flex-col gap-6 md:gap-8">
+
+    <div id="alertsContainer" class="hidden flex-col gap-3"></div>
+
+    <!-- Hero + 24h -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="card hero relative overflow-hidden lg:col-span-1 min-h-[380px] p-6 md:p-8 flex flex-col justify-between">
+        <div class="absolute -right-16 -top-16 opacity-5 pointer-events-none"><i id="heroIconBg" class="ph-fill ph-sun text-[320px]"></i></div>
+        <div class="relative z-10">
+          <div class="flex items-start justify-between gap-2">
+            <h1 id="locationName" class="text-3xl font-bold tracking-tight mb-1 text-zinc-100">Locating...</h1>
+            <span class="badge-live"><span class="live-dot"></span>LIVE</span>
+          </div>
+          <p id="currentDate" class="text-zinc-400 text-sm font-medium">--</p>
+        </div>
+        <div class="relative z-10 mt-6 flex flex-col items-start">
+          <i id="heroIcon" class="ph-fill ph-sun text-6xl text-blue-400 mb-2 drop-shadow-lg"></i>
+          <span id="currentTemp" class="text-7xl font-bold tracking-tighter text-zinc-50 mb-1">--°</span>
+          <p id="currentCondition" class="text-xl font-semibold text-zinc-300 capitalize">--</p>
+          <p class="text-zinc-500 mt-1">Feels like <span id="feelsLike">--°</span></p>
+        </div>
+        <div class="relative z-10 mt-6 pt-5 border-t border-zinc-800/50 text-zinc-300 flex flex-wrap items-center gap-x-6 gap-y-2">
+          <div class="flex items-center gap-2"><i class="ph ph-arrow-up text-zinc-500"></i><span id="highTemp" class="font-medium text-lg">--°</span></div>
+          <div class="flex items-center gap-2"><i class="ph ph-arrow-down text-zinc-500"></i><span id="lowTemp" class="font-medium text-lg">--°</span></div>
+          <div class="text-xs text-zinc-500 w-full" id="updatedAt">--</div>
+          <div class="text-xs text-zinc-500 w-full" id="obsLine"></div>
+        </div>
+      </section>
+
+      <section class="card p-5 md:p-6 lg:col-span-2 flex flex-col min-h-[380px]">
+        <h2 class="card-title"><i class="ph-fill ph-clock text-blue-400"></i> 24-Hour Forecast</h2>
+        <div id="hourly" class="flex gap-3 overflow-x-auto hide-scrollbar pb-2 snap-x"></div>
+        <div class="relative flex-1 min-h-[150px] mt-2"><canvas id="hourlyChart" aria-label="48 hour temperature and rain chance chart"></canvas></div>
+      </section>
+    </div>
+
+    <!-- Instruments -->
+    <div>
+      <div class="section-head"><i class="ph-fill ph-gauge text-zinc-500 text-xl"></i><h2>Instruments</h2><span class="text-xs text-zinc-500">live conditions</span></div>
+      <div id="gaugeGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-5"></div>
+    </div>
+
+    <!-- Radar + 14 day -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="card p-2 relative overflow-hidden lg:col-span-2 h-[440px] md:h-[520px]">
+        <div class="absolute top-4 left-4 z-[400] map-pill"><i class="ph-fill ph-radar text-blue-400"></i> Live Radar</div>
+        <div class="absolute bottom-4 left-4 right-4 z-[400] map-pill justify-between gap-3">
+          <button id="radarPlay" class="text-blue-400 text-xl" aria-label="Play or pause radar"><i class="ph-fill ph-pause"></i></button>
+          <input type="range" id="radarSlider" min="0" max="0" value="0" class="flex-1 accent-blue-500" aria-label="Radar frame">
+          <span id="radarTime" class="text-xs font-semibold tabular-nums w-16 text-right">--</span>
+        </div>
+        <div id="weatherMap" class="w-full h-full rounded-2xl z-[1]"></div>
+      </section>
+
+      <section class="card p-5 md:p-6 flex flex-col lg:h-[520px]">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="card-title !mb-0"><i class="ph-fill ph-calendar text-blue-400"></i> <span id="dailyTitle">14-Day Outlook</span></h2>
+          <div class="seg" id="dailySeg"><button data-d="7">7D</button><button data-d="14" class="on">14D</button></div>
+        </div>
+        <div id="daily" class="flex flex-col gap-1.5 overflow-y-auto pr-1 hide-scrollbar flex-1"></div>
+      </section>
+    </div>
+
+    <!-- AI + Recommendations -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="card p-5 md:p-6 flex flex-col">
+        <h2 class="card-title"><i class="ph-fill ph-sparkle text-fuchsia-400"></i> AI Weather Assistant</h2>
+        <div id="aiChips" class="flex flex-wrap gap-2 mb-3"></div>
+        <div id="aiOut" class="flex-1 text-sm text-zinc-300 leading-relaxed space-y-3 max-h-80 overflow-y-auto"><p class="text-zinc-500">Ask anything about the weather here. Answers use only this page's live data.</p></div>
+        <form id="aiForm" class="flex gap-2 mt-3">
+          <label for="aiInput" class="sr-only">Ask the AI</label>
+          <input id="aiInput" class="field flex-1" placeholder="Will it rain at 5pm?" autocomplete="off">
+          <button class="btn-primary" id="aiGo" aria-label="Ask"><i class="ph-bold ph-paper-plane-tilt"></i></button>
+        </form>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-lightbulb text-yellow-400"></i> Smart Recommendations</h2>
+        <div class="grid grid-cols-[110px_1fr] gap-4 items-center">
+          <div id="g-outdoor"></div>
+          <div id="recoList" class="flex flex-col gap-2"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Comparisons -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="card p-5 md:p-6 lg:col-span-2">
+        <h2 class="card-title"><i class="ph-fill ph-chart-line text-orange-400"></i> Today vs Yesterday</h2>
+        <div class="relative h-56"><canvas id="yestChart" aria-label="Today versus yesterday hourly temperature"></canvas></div>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-clock-counter-clockwise text-emerald-400"></i> This Day Last Year</h2>
+        <div id="lastYear" class="text-sm text-zinc-400">Loading archive...</div>
+      </section>
+    </div>
+
+    <section class="card p-5 md:p-6">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h2 class="card-title !mb-0"><i class="ph-fill ph-git-diff text-sky-400"></i> Model Showdown: daily highs</h2>
+        <span class="text-xs text-zinc-500">ECMWF vs GFS vs ICON vs JMA · pick a model up top to drive the whole dashboard</span>
+      </div>
+      <div class="relative h-64"><canvas id="modelChart" aria-label="Forecast model comparison chart"></canvas></div>
+    </section>
+
+    <!-- Air + Marine -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-leaf text-green-400"></i> Air Quality &amp; Pollen</h2>
+        <div id="pollutants" class="grid grid-cols-2 sm:grid-cols-3 gap-3"></div>
+        <h3 class="text-sm font-semibold text-zinc-300 mt-5 mb-2 flex items-center gap-2"><i class="ph-fill ph-flower text-pink-400"></i> Pollen</h3>
+        <div id="pollen" class="grid grid-cols-3 gap-3"></div>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-waves text-cyan-400"></i> Marine &amp; Surf</h2>
+        <div id="marine"></div>
+      </section>
+    </div>
+
+    <!-- Storm + Space -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-lightning text-red-400"></i> Storm Center</h2>
+        <div class="grid grid-cols-2 gap-3 mb-4"><div id="g-threat"></div><div id="g-cape"></div></div>
+        <div id="hazards" class="flex flex-col gap-2"></div>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-planet text-violet-400"></i> Space Weather &amp; Aurora</h2>
+        <div class="grid grid-cols-2 gap-3 mb-3"><div id="g-kp"></div><div id="g-aurora"></div></div>
+        <div id="spaceInfo" class="text-sm text-zinc-400"></div>
+      </section>
+    </div>
+
+    <!-- Aviation + Soil -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-airplane-tilt text-blue-400"></i> Aviation</h2>
+        <div id="aviation"></div>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-plant text-lime-400"></i> Soil &amp; Agriculture</h2>
+        <div id="soil"></div>
+      </section>
+    </div>
+
+    <!-- NWS -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-binoculars text-amber-400"></i> NWS Observed Now</h2>
+        <div id="nwsObs" class="text-sm text-zinc-400">Loading...</div>
+      </section>
+      <section class="card p-5 md:p-6 lg:col-span-2">
+        <h2 class="card-title"><i class="ph-fill ph-megaphone text-amber-400"></i> Official NWS Forecast</h2>
+        <div id="nwsForecast" class="flex flex-col gap-2 max-h-96 overflow-y-auto pr-1 text-sm">Loading...</div>
+      </section>
+    </div>
+
+  </div>
+</main>
+
+<footer class="max-w-7xl mx-auto px-4 pb-10 pt-2 text-xs text-zinc-500 leading-relaxed">
+  <p>NEXUS Ultimate · auto-refreshes every 10 min. Data: Open-Meteo (forecast, models, archive, air quality, marine), National Weather Service (alerts, observations, official forecast), RainViewer (radar), NOAA SWPC (Kp index), BigDataCloud (city name), Zippopotam (ZIP), Pollinations (AI). No API keys.</p>
+</footer>
+
+<div id="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-[2000] hidden px-4 py-2.5 rounded-full bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 shadow-2xl"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
