@@ -308,7 +308,9 @@ const MA_EMO = ['🔔', '🧥', '😎', '💨', '😷', '🌙', '☔', '❄️',
 const maU = (k, u) => k === 't' ? '°' + (u === 'C' ? 'C' : 'F') : k === 'w' ? (u === 'C' ? ' km/h' : ' mph') : k === 'p' ? (u === 'C' ? ' mm' : ' in') : k === 's' ? (u === 'C' ? ' cm' : ' in') : k === '%' ? '%' : '';
 const maId = () => Math.random().toString(36).slice(2, 9);
 const isF = () => S().unit !== 'C';
+const MA_EVS = [15, 30, 60];
 const MA_PRESETS = [
+  { key: 'live', label: '⏱️ Every 15 min update', make: () => ({ n: 'Live updates', e: '⏱️', k: 'i', ev: 15, h: ['07:00', '22:00'], d: [0, 1, 2, 3, 4, 5, 6], buzz: false }) },
   { key: 'hoodie', label: '🧥 Hoodie weather (<50°)', make: () => ({ n: 'Hoodie weather', e: '🧥', k: 'c', c: [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }], w: 'now', r: 'day', h: ['07:00', '22:00'] }) },
   { key: 'nice', label: '😎 Nice day (65–80° & dry)', make: () => ({ n: 'Nice day', e: '😎', k: 'c', c: [{ m: 'temp', o: 'btw', v: isF() ? 65 : 18, v2: isF() ? 80 : 27 }, { m: 'rain', o: 'lt', v: 20 }], w: 'today', r: 'day', h: ['07:00', '22:00'] }) },
   { key: 'windy', label: '💨 Windy (gusts >25 mph)', make: () => ({ n: 'Windy', e: '💨', k: 'c', c: [{ m: 'gust', o: 'gt', v: isF() ? 25 : 40 }], w: 'h3', r: 'flip', h: ['07:00', '22:00'] }) },
@@ -327,6 +329,7 @@ function condTxt(c, u, short) {
   return `${short ? MA_SHORT[c.m] : m[1]} ${c.o === 'gt' ? '>' : c.o === 'lt' ? '<' : ''}${c.o === 'btw' ? `${c.v}–${c.v2}` : c.v}${un}`;
 }
 function maSummary(a) {
+  if (a.k === 'i') return `Every ${a.ev || 15} min · ${t12((a.h || [])[0] || '07:00')}–${t12((a.h || [])[1] || '22:00')} · ${daysTxt(a.d)}`;
   if (a.k === 's') return `${t12(a.t)} · ${daysTxt(a.d)} · ${(MA_SEND.find(x => x[0] === a.s) || [, ''])[1]}`;
   return `${(a.c || []).map(c => condTxt(c, a.u, true)).join(' & ')} · ${MA_WIN_SHORT[a.w] || ''} · ${a.r === 'flip' ? 'every time' : 'once a day'}`;
 }
@@ -356,11 +359,12 @@ function renderAlerts() {
       <button class="ma-ico" data-test="${esc(a.id)}" aria-label="Test ${esc(a.n)}" title="Test this alert"><i class="ph ph-paper-plane-tilt"></i></button>
       <input type="checkbox" class="nsw" data-tog="${esc(a.id)}" ${a.on !== false ? 'checked' : ''} aria-label="${esc(a.n)} on/off">
     </div>`).join('') : `<p class="text-xs text-zinc-500 ma-empty">No alerts yet. Tap a preset above or <b class="text-zinc-300">New alert</b>.</p>`;
+  try { renderLive(); } catch (e) { console.warn('live', e); }
   $('#maCount').textContent = maList.length ? `${maList.filter(a => a.on !== false).length}/${maList.length} on` : '';
 }
 function addPreset(key) {
   const p = MA_PRESETS.find(x => x.key === key); if (!p) return;
-  if (maList.some(a => a.preset === key)) { const a = maList.find(x => x.preset === key); openEditor(a.id); return; }
+  if (maList.some(a => a.preset === key)) { const a = maList.find(x => x.preset === key); if (key === 'live' && a.on === false) { a.on = true; maSave(true).then(ok => maStatus(ok ? 'Live updates back on ✅' : 'Turned on. Turn on notifications above to get them.', ok ? 'ok' : 'warn')); return; } openEditor(a.id); return; }
   if (maList.length >= 20) { maStatus('That\'s 20 alerts, the max. Delete one first.', 'warn'); return; }
   const a = { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', preset: key, msg: '', ...p.make() };
   maList.push(a); maSave(true).then(ok => maStatus(ok ? `Added "${a.n}" ✅ Tap it to tweak, or ✈ to test.` : `Added "${a.n}". Turn on notifications above to get it.`, ok ? 'ok' : 'warn'));
@@ -369,10 +373,10 @@ function addPreset(key) {
 let draft = null;
 function openEditor(id) {
   const a = id ? maList.find(x => x.id === id) : null;
-  draft = a ? JSON.parse(JSON.stringify(a)) : { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', n: '', e: '🔔', k: 'c', c: [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }], w: 'now', r: 'day', h: ['07:00', '22:00'], t: '21:00', d: [0, 1, 2, 3, 4, 5, 6], s: 'tonight', msg: '' };
+  draft = a ? JSON.parse(JSON.stringify(a)) : { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', n: '', e: '🔔', k: 'c', c: [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }], w: 'now', r: 'day', h: ['07:00', '22:00'], t: '21:00', d: [0, 1, 2, 3, 4, 5, 6], s: 'tonight', ev: 15, buzz: false, msg: '' };
   draft._new = !a;
   draft.c ||= [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }]; draft.w ||= 'now'; draft.r ||= 'day'; draft.h ||= ['07:00', '22:00'];
-  draft.t ||= '21:00'; draft.d ||= [0, 1, 2, 3, 4, 5, 6]; draft.s ||= 'tonight';
+  draft.t ||= '21:00'; draft.d ||= [0, 1, 2, 3, 4, 5, 6]; draft.s ||= 'tonight'; draft.ev ||= 15; draft.buzz = !!draft.buzz;
   renderEditor();
   const sh = $('#maSheet'); sh.classList.remove('hidden'); sh.classList.add('flex'); document.body.style.overflow = 'hidden';
   setTimeout(() => { const n = $('#maName'); if (n && draft._new) n.focus({ preventScroll: true }); }, 50);
@@ -389,6 +393,9 @@ function readEditor() {
       return c;
     });
     draft.w = $('#maWin').value; draft.r = $('#maRe').value; draft.h = [$('#maH1').value || '07:00', $('#maH2').value || '22:00'];
+  } else if (draft.k === 'i') {
+    const ev = document.querySelector('#maBody [data-ev].on'); if (ev) draft.ev = +ev.dataset.ev;
+    draft.h = [$('#maH1').value || '07:00', $('#maH2').value || '22:00']; draft.buzz = !!($('#maBuzz') || {}).checked;
   } else { draft.t = $('#maTime').value || '21:00'; draft.s = $('#maSend').value; }
 }
 function condRow(c, i, n) {
@@ -405,14 +412,24 @@ function condRow(c, i, n) {
   </div>`;
 }
 function renderEditor() {
-  const d = draft, cond = d.k === 'c';
+  const d = draft, cond = d.k === 'c', live = d.k === 'i';
+  const dayPick = `<p class="ma-lbl">Days</p>
+      <div class="flex gap-1.5 justify-between">${MA_DAYS.map((x, i) => `<button class="ma-day ${d.d.includes(i) ? 'on' : ''}" data-day="${i}" aria-pressed="${d.d.includes(i)}" aria-label="${MA_DAYN[i]}">${x}</button>`).join('')}</div>
+      <div class="flex gap-3 mt-2 text-xs font-semibold"><button class="text-blue-400" data-days="0123456">Every day</button><button class="text-blue-400" data-days="12345">Weekdays</button><button class="text-blue-400" data-days="06">Weekends</button></div>`;
   $('#maTitle').textContent = d._new ? 'New alert' : 'Edit alert';
   $('#maBody').innerHTML = `
     <div class="flex gap-2"><input id="maEmoji" class="ma-in w-14 text-center text-lg" value="${esc(d.e)}" maxlength="8" aria-label="Emoji">
       <input id="maName" class="ma-in flex-1" value="${esc(d.n)}" maxlength="40" placeholder="Name it (e.g. Hoodie weather)" aria-label="Alert name"></div>
     <div class="flex gap-1.5 mt-2 overflow-x-auto ma-scroll">${MA_EMO.map(x => `<button class="ma-emopick" data-emo="${x}" aria-label="Use ${x}">${x}</button>`).join('')}</div>
-    <div class="seg mt-4" role="tablist"><button class="flex-1 !py-2 ${cond ? 'on' : ''}" data-kind="c"><i class="ph-bold ph-thermometer-simple"></i> When the weather…</button><button class="flex-1 !py-2 ${!cond ? 'on' : ''}" data-kind="s"><i class="ph-bold ph-alarm"></i> At a set time</button></div>
-    ${cond ? `
+    <div class="seg ma-kinds mt-4" role="tablist"><button class="flex-1 !py-2 ${cond ? 'on' : ''}" data-kind="c"><i class="ph-bold ph-thermometer-simple"></i> Weather</button><button class="flex-1 !py-2 ${d.k === 's' ? 'on' : ''}" data-kind="s"><i class="ph-bold ph-alarm"></i> Set time</button><button class="flex-1 !py-2 ${live ? 'on' : ''}" data-kind="i"><i class="ph-bold ph-repeat"></i> Repeat</button></div>
+    ${live ? `
+      <p class="ma-lbl">Send current conditions every</p>
+      <div class="seg w-full">${MA_EVS.map(v => `<button class="flex-1 !py-2 ${+d.ev === v ? 'on' : ''}" data-ev="${v}">${v} min</button>`).join('')}</div>
+      <p class="ma-lbl">Only between</p>
+      <div class="flex items-center gap-2"><input id="maH1" type="time" class="ma-in flex-1" value="${esc(d.h[0])}" aria-label="From"><span class="text-zinc-500 text-sm">and</span><input id="maH2" type="time" class="ma-in flex-1" value="${esc(d.h[1])}" aria-label="To"></div>
+      ${dayPick}
+      <label class="flex items-center gap-3 mt-4"><span class="flex-1"><span class="block text-sm font-semibold text-zinc-200">Buzz each time</span><span class="block text-xs text-zinc-500">Off = it quietly refreshes the same notification</span></span><input id="maBuzz" type="checkbox" class="nsw" ${d.buzz ? 'checked' : ''} aria-label="Buzz each time"></label>
+    ` : cond ? `
       <p class="ma-lbl">Send it when</p>
       <div class="flex flex-col gap-2" id="maConds">${d.c.map((c, i) => condRow(c, i, d.c.length)).join('<p class="text-[11px] font-bold text-zinc-500 text-center tracking-widest">AND</p>')}</div>
       ${d.c.length < 3 ? `<button id="maAddC" class="text-blue-400 text-xs font-semibold mt-2"><i class="ph-bold ph-plus"></i> Add another condition</button>` : ''}
@@ -426,14 +443,12 @@ function renderEditor() {
     ` : `
       <p class="ma-lbl">Time</p>
       <input id="maTime" type="time" class="ma-in w-full" value="${esc(d.t)}" aria-label="Time">
-      <p class="ma-lbl">Days</p>
-      <div class="flex gap-1.5 justify-between">${MA_DAYS.map((x, i) => `<button class="ma-day ${d.d.includes(i) ? 'on' : ''}" data-day="${i}" aria-pressed="${d.d.includes(i)}" aria-label="${MA_DAYN[i]}">${x}</button>`).join('')}</div>
-      <div class="flex gap-3 mt-2 text-xs font-semibold"><button class="text-blue-400" data-days="0123456">Every day</button><button class="text-blue-400" data-days="12345">Weekdays</button><button class="text-blue-400" data-days="06">Weekends</button></div>
+      ${dayPick}
       <p class="ma-lbl">What to send</p>
       <select id="maSend" class="ma-in w-full">${MA_SEND.map(w => `<option value="${w[0]}" ${w[0] === d.s ? 'selected' : ''}>${w[1]}</option>`).join('')}</select>
     `}
     <p class="ma-lbl">Your message <span class="font-normal text-zinc-500">(optional)</span></p>
-    <input id="maMsg" class="ma-in w-full" value="${esc(d.msg || '')}" maxlength="160" placeholder="${cond ? 'e.g. Grab a hoodie!' : 'e.g. Charge your phone 🔋'}" aria-label="Your message">
+    <input id="maMsg" class="ma-in w-full" value="${esc(d.msg || '')}" maxlength="160" placeholder="${cond ? 'e.g. Grab a hoodie!' : live ? 'Added under the weather' : 'e.g. Charge your phone 🔋'}" aria-label="Your message">
     <p class="ma-preview" id="maPrev"></p>`;
   maPreview();
   const body = $('#maBody');
@@ -444,6 +459,7 @@ function renderEditor() {
   body.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { readEditor(); draft.c.splice(+b.dataset.rm, 1); renderEditor(); });
   body.querySelectorAll('.ma-m').forEach(sel => sel.onchange = () => { readEditor(); const i = +sel.closest('.ma-cond').dataset.i, m = MA_M[sel.value]; draft.c[i].v = draft.u === 'C' ? m[4] : m[3]; if (draft.c[i].o === 'btw') draft.c[i].v2 = +(draft.c[i].v + m[5] * 10).toFixed(2); renderEditor(); });
   body.querySelectorAll('.ma-o').forEach(sel => sel.onchange = () => { readEditor(); const i = +sel.closest('.ma-cond').dataset.i, m = MA_M[draft.c[i].m]; if (sel.value === 'btw' && !isFinite(draft.c[i].v2)) draft.c[i].v2 = +((draft.c[i].v || 0) + m[5] * 10).toFixed(2); renderEditor(); });
+  body.querySelectorAll('[data-ev]').forEach(b => b.onclick = () => { readEditor(); draft.ev = +b.dataset.ev; renderEditor(); });
   const add = $('#maAddC'); if (add) add.onclick = () => { readEditor(); draft.c.push({ m: 'rain', o: 'lt', v: 20 }); renderEditor(); };
   body.querySelectorAll('input,select').forEach(el => el.addEventListener('input', maPreview));
   $('#maDel').classList.toggle('hidden', !!draft._new);
@@ -452,22 +468,26 @@ function maPreview() {
   readEditor(); const d = draft, el = $('#maPrev'); if (!el) return;
   let t;
   if (d.k === 'c') t = `Pings you when ${(d.c || []).map(c => condTxt(c, d.u).toLowerCase()).join(' and ')} ${({ now: 'right now', h3: 'in the next 3 hours', h6: 'in the next 6 hours', h12: 'in the next 12 hours', today: 'later today', tom: 'tomorrow (heads-up after 5 PM)' })[d.w]}, ${d.r === 'flip' ? 'every time it starts' : 'once a day max'}, ${t12(d.h[0])}–${t12(d.h[1])}.`;
+  else if (d.k === 'i') t = `Every ${d.ev} min, ${t12(d.h[0])}–${t12(d.h[1])}, ${daysTxt(d.d).toLowerCase()}: temp, feels like, sky, rain chance next hour and wind. ${d.buzz ? 'Buzzes each time.' : 'Updates the same notification quietly, no pile-up.'}`;
   else t = `Pings you at ${t12(d.t)}, ${daysTxt(d.d).toLowerCase()}, with ${(MA_SEND.find(x => x[0] === d.s) || [, ''])[1].toLowerCase()}.`;
   el.innerHTML = `<i class="ph-fill ph-info text-blue-400"></i> ${esc(t)}`;
 }
 function validDraft() {
   const d = draft;
+  if (!d.n && d.k === 'i') d.n = d.ev === 15 ? 'Live updates' : `Every ${d.ev} min update`;
   if (!d.n) d.n = d.k === 's' ? `${(MA_SEND.find(x => x[0] === d.s) || [, 'My alert'])[1]} ${t12(d.t)}` : (MA_M[d.c[0]?.m]?.[1] || 'My alert') + ' alert';
   if (d.k === 'c') {
     for (const c of d.c) if (!isFinite(c.v) || (c.o === 'btw' && !isFinite(c.v2))) return 'Put a number in every box.';
   } else if (!d.d.length) return 'Pick at least one day.';
+  if (d.k === 'i' && d.h[0] === d.h[1]) { /* same start + end = all day, that's allowed */ }
   if (d.k === 's' && d.s === 'msg' && !d.msg) return 'Type the message you want to get.';
   return '';
 }
 function commitDraft() {
   readEditor(); const err = validDraft(); if (err) { const e = $('#maErr'); e.textContent = err; e.classList.remove('hidden'); return null; }
   const a = { ...draft }; delete a._new;
-  if (a.k === 'c') { delete a.t; delete a.d; delete a.s; } else { delete a.c; delete a.w; delete a.r; delete a.h; }
+  if (a.k === 'c') { delete a.t; delete a.d; delete a.s; } else if (a.k === 'i') { delete a.c; delete a.w; delete a.r; delete a.t; delete a.s; } else { delete a.c; delete a.w; delete a.r; delete a.h; }
+  if (a.k !== 'i') { delete a.ev; delete a.buzz; }
   if (!a.msg) delete a.msg;
   const i = maList.findIndex(x => x.id === a.id);
   if (i >= 0) { if (maList[i].preset && JSON.stringify(maList[i]) !== JSON.stringify(a)) a.preset = maList[i].preset; maList[i] = a; }
@@ -502,10 +522,57 @@ function initAlerts() {
   renderAlerts();
 }
 
+/* ---------- Live updates: one-tap card in the Notifications panel (it's the "Every 15 min update" alert in My alerts) ---------- */
+const liveA = () => maList.find(a => a.preset === 'live') || null;
+function liveStatus(msg, kind) { const el = $('#liveStatus'); if (!el) return; el.textContent = msg; el.className = 'text-xs mt-2 ' + (kind === 'ok' ? 'text-emerald-400' : kind === 'warn' ? 'text-amber-400' : 'text-zinc-400'); }
+function renderLive() {
+  const box = $('#liveBox'); if (!box) return;
+  const a = liveA(), on = !!a && a.on !== false;
+  const h = (a && a.h) || ['07:00', '22:00'], d = (a && a.d) || [0, 1, 2, 3, 4, 5, 6], ev = (a && a.ev) || 15;
+  box.innerHTML = `<label class="ntype live-row"><i class="ph-fill ph-broadcast text-emerald-400 text-xl"></i><span class="flex-1 min-w-0"><span class="block text-sm font-semibold text-zinc-200">Live updates <span class="nbadge on ml-1">NEW</span></span><span class="block text-xs text-zinc-500">${on ? esc(`Every ${ev} min · ${t12(h[0])}–${t12(h[1])} · ${daysTxt(d)}`) : 'Temp, feels like, rain + wind every 15 min. Updates in place, no pile-up.'}</span></span><input type="checkbox" class="nsw" id="liveTog" ${on ? 'checked' : ''} aria-label="Live updates on or off"></label>
+  ${on ? `<div class="live-opts">
+    <div class="seg w-full" role="group" aria-label="How often">${MA_EVS.map(v => `<button class="flex-1 !py-1.5 ${ev === v ? 'on' : ''}" data-lev="${v}" aria-pressed="${ev === v}">${v} min</button>`).join('')}</div>
+    <div class="flex items-center gap-2 mt-3"><span class="text-xs text-zinc-400">From</span><input id="liveH1" type="time" class="ma-in live-time flex-1" value="${esc(h[0])}" aria-label="Live updates start time"><span class="text-xs text-zinc-400">to</span><input id="liveH2" type="time" class="ma-in live-time flex-1" value="${esc(h[1])}" aria-label="Live updates end time"></div>
+    <div class="flex gap-1 justify-between mt-3">${MA_DAYS.map((x, i) => `<button class="ma-day live-day ${d.includes(i) ? 'on' : ''}" data-lday="${i}" aria-pressed="${d.includes(i)}" aria-label="${MA_DAYN[i]}">${x}</button>`).join('')}</div>
+    <div class="flex items-center gap-3 mt-3"><label class="flex items-center gap-2 flex-1 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" class="nsw" id="liveBuzz" ${a.buzz ? 'checked' : ''} aria-label="Buzz each time"> Buzz each time</label><button class="btn-soft !py-1.5 !px-3 !text-xs" id="liveTest"><i class="ph ph-paper-plane-tilt"></i> Test</button></div>
+  </div>` : ''}`;
+}
+function liveEdit(fn, msg) {
+  let a = liveA();
+  if (!a) { if (maList.length >= 20) { liveStatus('You have 20 alerts, the max. Delete one in My alerts first.', 'warn'); renderLive(); return; } a = { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', preset: 'live', ...MA_PRESETS[0].make() }; maList.unshift(a); }
+  fn(a);
+  if (a.on !== false && !pushIsOn()) {
+    P.custom = maList; lsSet('push', P); renderAlerts();
+    liveStatus('Turning on notifications…');
+    enablePush().then(() => liveStatus(pushIsOn() ? `Live updates on ✅ First one lands within ${a.ev || 15} min.` : 'Saved. Allow notifications to get them.', pushIsOn() ? 'ok' : 'warn'));
+    return;
+  }
+  maSave(true).then(ok => liveStatus(ok ? (typeof msg === 'function' ? msg(a) : msg) : 'Saved on this phone. Turn on notifications above to get them.', ok ? 'ok' : 'warn'));
+}
+function initLive() {
+  const box = $('#liveBox'); if (!box) return;
+  box.addEventListener('click', e => {
+    const b = e.target.closest('[data-lev],[data-lday],#liveTest'); if (!b) return;
+    e.preventDefault();
+    if (b.id === 'liveTest') { const a = liveA(); if (!a) return; if (!pushIsOn()) { liveStatus('Turn on notifications first, then tap Test.', 'warn'); return; }
+      liveStatus('Sending test…'); clearTimeout(maT); publish('test', { testAlert: a.id }).then(() => liveStatus('Test sent 🧪 Your live update pops up in about a minute.', 'ok')).catch(err => liveStatus('Test failed: ' + (err.message || err), 'warn')); return; }
+    if (b.dataset.lev) liveEdit(a => { a.ev = +b.dataset.lev; }, a => `Every ${a.ev} min ✅`);
+    else { const i = +b.dataset.lday; liveEdit(a => { const d = Array.isArray(a.d) ? a.d : [0, 1, 2, 3, 4, 5, 6]; const nd = d.includes(i) ? d.filter(x => x !== i) : [...d, i].sort(); if (nd.length) a.d = nd; }, a => `${daysTxt(a.d)} ✅`); }
+  });
+  box.addEventListener('change', e => {
+    const t = e.target;
+    if (t.id === 'liveTog') liveEdit(a => { a.on = t.checked; }, a => a.on ? `Live updates on ✅ Every ${a.ev || 15} min, ${t12(a.h[0])}–${t12(a.h[1])}.` : 'Live updates off.');
+    else if (t.id === 'liveBuzz') liveEdit(a => { a.buzz = t.checked; }, a => a.buzz ? 'It\'ll buzz each time ✅' : 'Quiet updates ✅ It refreshes in place without buzzing again.');
+    else if (t.id === 'liveH1' || t.id === 'liveH2') liveEdit(a => { a.h = [$('#liveH1').value || '07:00', $('#liveH2').value || '22:00']; }, a => `Between ${t12(a.h[0])} and ${t12(a.h[1])} ✅`);
+  });
+  renderLive();
+}
+
 /* ---------- boot ---------- */
 function boot() {
   initPWA(); bindShareCard(); jump();
   try { initAlerts(); } catch (e) { console.warn('my alerts', e); }
+  try { initLive(); } catch (e) { console.warn('live updates', e); }
   window.addEventListener('hashchange', jump);
   let first = true;
   document.addEventListener('nx:data', () => {

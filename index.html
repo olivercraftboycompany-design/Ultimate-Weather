@@ -174,7 +174,9 @@
       </div>
       <p class="text-sm text-zinc-400 mb-4">Get pinged even when the app is closed. <span id="pushLoc"></span></p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-2" id="pushTypes"></div>
-      <div class="ntype mt-2" id="pushEveryRow"><i class="ph-fill ph-timer text-blue-400 text-xl"></i><span class="flex-1"><span class="block text-sm font-semibold text-zinc-200">Check every</span><span class="block text-xs text-zinc-500">How often to check for rain + alerts (and your own alerts).</span></span><select id="pushEvery" class="ntime" aria-label="Check every"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select></div>
+      <div id="liveBox" class="mt-2"></div>
+      <p id="liveStatus" class="text-xs text-zinc-500"></p>
+      <div class="ntype mt-2" id="pushEveryRow"><i class="ph-fill ph-timer text-blue-400 text-xl"></i><span class="flex-1"><span class="block text-sm font-semibold text-zinc-200">Check every</span><span class="block text-xs text-zinc-500">How often to check for rain + alerts (and your own alerts). Live updates keep their own timer.</span></span><select id="pushEvery" class="ntime" aria-label="Check every"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select></div>
       <div class="flex flex-wrap items-center gap-2 mt-4" id="pushMain"></div>
       <p id="pushStatus" class="text-xs mt-3 text-zinc-500"></p>
       <div class="mt-5 pt-4 border-t border-zinc-800 ma-wrap" id="myAlerts">

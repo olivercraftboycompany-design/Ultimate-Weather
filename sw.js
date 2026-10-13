@@ -1,5 +1,5 @@
 /* NEXUS Ultimate service worker. Bump VERSION when you change files so phones get the update. */
-const VERSION = 'nexus-v3';
+const VERSION = 'nexus-v4';
 importScripts('push-box.js');
 
 const SHELL = [
@@ -70,9 +70,11 @@ self.addEventListener('push', e => {
     icon: 'icons/icon-192.png',
     badge: 'icons/badge-96.png',
     tag: d.tag || 'nexus',
-    renotify: true,
+    // Live updates send renotify:false + the same tag, so each one quietly replaces the last instead of stacking
+    renotify: d.renotify !== false,
+    silent: !!d.silent,
     requireInteraction: !!d.sticky,
-    vibrate: d.sticky ? [200, 100, 200, 100, 200] : [120, 60, 120],
+    ...(d.silent ? {} : { vibrate: d.sticky ? [200, 100, 200, 100, 200] : [120, 60, 120] }), // silent + vibrate is a TypeError
     timestamp: d.ts || Date.now(),
     data: { url: d.url || './' }
   };

@@ -13,7 +13,9 @@ const TOPIC = env.NTFY_TOPIC;
 const STATE_FILE = path.join(env.STATE_DIR || '.state', 'state.bin');
 let FORCE_TEST = env.FORCE_TEST === 'true';
 const DRY = env.DRY_RUN === 'true';
-let NOW = env.NOW_OVERRIDE ? Date.parse(env.NOW_OVERRIDE) : Date.now();
+// NOW_OVERRIDE (local testing only) shifts the clock; the loop keeps ticking from there
+const NOW_SHIFT = env.NOW_OVERRIDE ? Date.parse(env.NOW_OVERRIDE) - Date.now() : 0;
+let NOW = Date.now() + NOW_SHIFT;
 const LOOP_MINUTES = +env.LOOP_MINUTES || 0;
 const TICK_MS = (+env.TICK_SECONDS || 60) * 1000;
 const UA = 'NEXUS-Ultimate-Weather (github.com/olivercraftboycompany-design/Ultimate-Weather)';
@@ -100,7 +102,7 @@ async function checkWeather(state, sid) {
   const s = state.subs[sid], p = s.prefs || {}, F = s.unit !== 'C', deg = '°';
   const sent = s.sent || (s.sent = { alerts: {}, morning: null, temp: null, rainAt: 0, dryAt: 0 });
   const u = `https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&timezone=auto&forecast_days=8`
-    + '&current=temperature_2m,apparent_temperature,weather_code,precipitation,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,cloud_cover,dew_point_2m'
+    + '&current=temperature_2m,apparent_temperature,weather_code,precipitation,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,dew_point_2m'
     + '&minutely_15=precipitation,weather_code&past_minutely_15=1&forecast_minutely_15=6'
     + '&hourly=precipitation_probability,temperature_2m,weather_code,apparent_temperature,wind_speed_10m,wind_gusts_10m,uv_index,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,snowfall'
     + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_gusts_10m_max,wind_speed_10m_max,uv_index_max,snowfall_sum'
@@ -241,7 +243,7 @@ function convert(k, v, from, to) { // the alert was written in one unit system, 
   return +v;
 }
 const toMin = t => { const [h, m] = String(t || '').split(':').map(Number); return isFinite(h) ? h * 60 + (m || 0) : null; };
-const sigOf = a => crypto.createHash('sha1').update(JSON.stringify([a.k, a.c, a.w, a.r, a.h, a.t, a.d, a.s, a.u])).digest('hex').slice(0, 10);
+const sigOf = a => crypto.createHash('sha1').update(JSON.stringify([a.k, a.c, a.w, a.r, a.h, a.t, a.d, a.s, a.u, ...(a.k === 'i' ? [a.ev] : [])])).digest('hex').slice(0, 10);
 const opTxt = (o, v, v2, k, F) => o === 'gt' ? `above ${dispV(k, v)}${unitTxt(k, F)}` : o === 'lt' ? `below ${dispV(k, v)}${unitTxt(k, F)}` : `${dispV(k, v)}–${dispV(k, v2)}${unitTxt(k, F)}`;
 
 function hourIdx(W, local) { const key = local.toISOString().slice(0, 13); const i = W.hourly.time.findIndex(t => t.slice(0, 13) === key); return i < 0 ? 0 : i; }
@@ -340,12 +342,59 @@ function scheduledBody(a, W, ctx) {
     default: return dayLine(W, ti, F);
   }
 }
-const cleanAlerts = p => (Array.isArray(p.custom) ? p.custom : []).filter(a => a && typeof a.id === 'string' && (a.k === 'c' || a.k === 's')).slice(0, 25);
+const cleanAlerts = p => (Array.isArray(p.custom) ? p.custom : []).filter(a => a && typeof a.id === 'string' && (a.k === 'c' || a.k === 's' || a.k === 'i')).slice(0, 25);
 function customScheduledDue(s) {
   if (s.off == null) return false;
   const [today, mins] = minsLocal(s), dow = new Date(NOW + s.off).getUTCDay(), st = ((s.sent || {}).custom) || {};
   return cleanAlerts(s.prefs || {}).some(a => a.k === 's' && a.on !== false && (a.d || []).includes(dow) && (() => { const t = toMin(a.t); return t != null && mins >= t && mins <= t + 90 && (st[a.id] || {}).d !== today; })());
 }
+/* ---------- Live updates ("every 15 min" alerts, kind 'i') ----------
+   Fires once per clock slot (:00/:15/:30/:45 for 15 min), only inside its hours + days.
+   Every update reuses one tag and asks the phone not to re-alert, so it replaces the last one instead of stacking. */
+const evOf = a => { const v = +a.ev || 15; return v >= 60 ? 60 : v >= 30 ? 30 : 15; };
+function inWindow(a, mins) {
+  const [h1, h2] = (Array.isArray(a.h) ? a.h : ['07:00', '22:00']).map(toMin);
+  return h1 == null || h2 == null || h1 === h2 ? true : h1 < h2 ? (mins >= h1 && mins < h2) : (mins >= h1 || mins < h2);
+}
+function liveSlot(a, st, today, mins, dow) {
+  // → { due, why, slot }
+  const days = Array.isArray(a.d) ? a.d : [0, 1, 2, 3, 4, 5, 6], ev = evOf(a);
+  // a window that runs past midnight belongs to the day it started on
+  const startMin = toMin((a.h || [])[0]), wraps = startMin != null && toMin((a.h || [])[1]) != null && toMin(a.h[1]) < startMin && mins < toMin(a.h[1]);
+  const dayOk = days.includes(wraps ? (dow + 6) % 7 : dow);
+  if (!dayOk) return { due: false, why: 'not one of its days' };
+  if (!inWindow(a, mins)) return { due: false, why: 'outside its active hours' };
+  const slot = `${today}#${Math.floor(mins / ev)}`;
+  if (st.slot === slot) return { due: false, why: `already sent this ${ev}-min slot`, slot };
+  // just sent (e.g. switched on a minute before the slot turned): skip this slot, keep the clock rhythm
+  if (st.at && NOW - st.at < Math.max(4, ev / 3) * 60000) return { due: false, why: `sent ${Math.round((NOW - st.at) / 60000)} min ago, skipping this slot`, slot, skip: true };
+  return { due: true, why: 'new slot', slot };
+}
+function customIntervalDue(s) {
+  if (s.off == null) return false;
+  const [today, mins] = minsLocal(s), dow = new Date(NOW + s.off).getUTCDay(), st = ((s.sent || {}).custom) || {};
+  return cleanAlerts(s.prefs || {}).some(a => a.k === 'i' && a.on !== false && (() => { const x = st[a.id] && st[a.id].sig === sigOf(a) ? st[a.id] : {}; const r = liveSlot(a, x, today, mins, dow); return r.due; })());
+}
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+function liveBody(W, F, a) {
+  const c = W.current, H = W.hourly, local = new Date(NOW + W.utc_offset_seconds * 1000), hi = hourIdx(W, local);
+  const t = Math.round(c.temperature_2m), fl = Math.round(c.apparent_temperature), code = c.weather_code;
+  // rain chance for the next 60 minutes: the higher of this hour and the next
+  const pr = Math.max(H.precipitation_probability[hi] || 0, H.precipitation_probability[hi + 1] || 0);
+  let rainTxt = `Rain ${pr}% next hr`;
+  const M = W.minutely_15, thr = F ? 0.004 : 0.1;
+  if (M) {
+    const nowISO = local.toISOString().slice(0, 16); let i0 = M.time.findIndex(x => x > nowISO) - 1; if (i0 < 0) i0 = 0;
+    if ((M.precipitation[i0] || 0) >= thr || (c.precipitation || 0) >= thr) rainTxt = `${code >= 71 && code <= 86 ? 'Snowing' : 'Raining'} now · ${pr}% next hr`;
+    else for (let k = i0 + 1; k <= i0 + 4 && k < M.time.length; k++) if ((M.precipitation[k] || 0) >= thr) { rainTxt = `Rain ~${hhmm(M.time[k])} · ${pr}%`; break; }
+  }
+  const ws = Math.round(c.wind_speed_10m), g = Math.round(c.wind_gusts_10m || 0), dir = c.wind_direction_10m != null ? COMPASS[Math.round(c.wind_direction_10m / 45) % 8] + ' ' : '';
+  const wind = `Wind ${dir}${ws}${F ? ' mph' : ' km/h'}${g >= ws + (F ? 8 : 13) ? ` (gusts ${g})` : ''}`;
+  const title = `${EMO(code)} ${t}° · ${WXT[code] || 'Now'}`;
+  const body = `Feels ${fl}° · ${rainTxt} · ${wind}`;
+  return { title, body, sum: `${t}°/${fl}° ${WXT[code] || code}, rain ${pr}%, wind ${ws}` };
+}
+
 async function customAlerts(state, sid, W, ctx) {
   const s = state.subs[sid], F = s.unit !== 'C', list = cleanAlerts(s.prefs || {});
   const sent = s.sent; sent.custom ||= {};
@@ -366,6 +415,18 @@ async function customAlerts(state, sid, W, ctx) {
     const isTest = a.id === ctx.customTest;
     if (a.on === false && !isTest) continue;
     const st = sent.custom[a.id] && sent.custom[a.id].sig === sigOf(a) ? sent.custom[a.id] : (sent.custom[a.id] = { sig: sigOf(a) });
+    if (a.k === 'i') {
+      const r = isTest ? { due: true, why: 'test' } : liveSlot(a, st, ctx.today, ctx.mins, dow);
+      if (r.skip) st.slot = r.slot;
+      const L = liveBody(W, F, a), ev = evOf(a);
+      log(`  my alert #${i} [live update every ${ev} min, ${(a.h || []).join('-')}, ${(a.d || []).length || 7} days] → ${r.why}${r.due ? ' → SEND (' + L.sum + ')' : ''}`);
+      if (!r.due) continue;
+      const m = msgOf(a);
+      const ok = await push(state, sid, { title: `${isTest ? '🧪 ' : ''}${L.title}`, body: [L.body, m].filter(Boolean).join('\n'), tag: 'nx-live-' + a.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 20), url: './', renotify: !!a.buzz },
+        { ttl: Math.max(300, ev * 60 - 60), urgency: 'normal' });
+      if (ok && !isTest) { st.slot = r.slot; st.at = NOW; }
+      continue;
+    }
     if (a.k === 'c') {
       const res = evalCondition(a, W, AQ, fx);
       const desc = (a.c || []).map(c => `${c.m} ${c.o} ${c.v}${c.o === 'btw' ? '-' + c.v2 : ''}`).join(' & ');
@@ -418,7 +479,7 @@ function morningDue(s) {
   return (s.sent || {}).morning !== today && mins >= target && mins <= target + 150;
 }
 async function cycle(verbose) {
-  NOW = Date.now();
+  NOW = Date.now() + NOW_SHIFT;
   for (const m of await readInbox(state, verbose)) {
     if (m.type === 'unsub') { const sid = m.endpoint && idOf(m.endpoint); if (sid && state.subs[sid]) { delete state.subs[sid]; log('unsubscribed', sid); } continue; }
     if (!m.sub || !m.sub.endpoint || !m.sub.keys) continue;
@@ -437,8 +498,9 @@ async function cycle(verbose) {
     const s = state.subs[sid], every = Math.min(60, Math.max(5, +(s.prefs && s.prefs.every) || 15));
     const due = !s.lastCheck || NOW - s.lastCheck >= every * 60000 - 30000;
     const md = morningDue(s), cd = !due && customScheduledDue(s); // timed "My alerts" don't wait for "Check every" either
-    if (!due && !md && !cd && !s.testPending && !FORCE_TEST) { if (verbose) log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
-    log(`checking ${sid} (every ${every} min${md ? ', morning summary due' : ''}${cd ? ', timed alert due' : ''}${s.testPending || FORCE_TEST ? ', test requested' : ''})`);
+    const ld = !due && !cd && customIntervalDue(s); // Live updates run on their own 15/30/60-min clock
+    if (!due && !md && !cd && !ld && !s.testPending && !FORCE_TEST) { if (verbose) log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
+    log(`checking ${sid} (every ${every} min${md ? ', morning summary due' : ''}${cd ? ', timed alert due' : ''}${ld ? ', live update due' : ''}${s.testPending || FORCE_TEST ? ', test requested' : ''})`);
     s.lastCheck = NOW;
     try { await checkWeather(state, sid); } catch (e) { log('check failed for', sid, e.message); }
   }

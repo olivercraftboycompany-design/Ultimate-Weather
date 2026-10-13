@@ -155,3 +155,10 @@ html.light .ma-row,html.light .ma-cond,html.light .ma-emopick{background:#f4f4f5
 html.light .ma-in{background:#fff;color:#18181b;border-color:#d4d4d8;color-scheme:light}
 html.light .ma-preview{color:#334155}
 html.light .ma-day{border-color:#d4d4d8;color:#52525b}html.light .ma-day.on{color:#fff}
+
+/* Live updates card */
+.live-opts{background:var(--card2,#18181b);border:1px solid var(--border);border-top:none;border-radius:0 0 1rem 1rem;margin-top:-.75rem;padding:1.1rem .9rem .8rem}
+#liveBox .live-row{position:relative;z-index:1}
+.live-day{width:36px;height:36px;font-size:.8rem}
+.live-time{padding:.35rem .45rem;font-size:.85rem}
+html.light .live-opts{background:#f4f4f5}
