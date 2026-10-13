@@ -1,0 +1,62 @@
+{
+  "name": "NEXUS Ultimate Weather",
+  "short_name": "NEXUS",
+  "description": "Live weather, radar, alerts and push notifications.",
+  "id": "/Ultimate-Weather/",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "categories": [
+    "weather",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Live Radar",
+      "short_name": "Radar",
+      "url": "./#radar",
+      "icons": [
+        {
+          "src": "icons/shortcut-radar.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "short_name": "Alerts",
+      "url": "./#notify",
+      "icons": [
+        {
+          "src": "icons/shortcut-bell.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

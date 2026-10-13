@@ -1,0 +1,64 @@
+name: Weather push notifications
+
+on:
+  schedule:
+    # GitHub runs scheduled jobs "best effort": usually every 15-20 min, sometimes later at busy times.
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Send a test notification to every subscribed device'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write   # lets the job tidy up its own old state caches
+
+concurrency:
+  group: weather-push
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: uw-state-${{ github.run_id }}
+          restore-keys: uw-state-
+      - name: Install web-push
+        working-directory: .github/push
+        run: npm install --no-audit --no-fund --loglevel=error
+      - name: Check weather and send notifications
+        run: node .github/push/send.mjs
+        env:
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          BOX_PRIVATE: ${{ secrets.BOX_PRIVATE }}
+          NTFY_TOPIC: uw-sub-82bf0d55533924ae6683811a
+          STATE_DIR: .state
+          FORCE_TEST: ${{ github.event.inputs.test == 'true' }}
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: uw-state-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Tidy old state caches
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --key uw-state- --sort created_at --order desc --limit 100 --json id --jq '.[3:][].id' \
+            | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY" || true

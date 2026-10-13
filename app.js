@@ -14,6 +14,7 @@ const S = {
   D: null, AQ: null, MR: null, LY: null, MC: null, KP: null, NWS: null, ALERTS: [], chat: [], updated: null
 };
 window.state = S;
+window.NX = { get S() { return S; }, F: () => S.unit === 'F', toast: m => toast(m), reload: () => loadAll(false) };
 const F = () => S.unit === 'F';
 const tU = () => F() ? '°F' : '°C';
 const wU = () => F() ? 'mph' : 'km/h';
@@ -216,6 +217,23 @@ function mergeModel(best, m) {
 }
 let loading = false;
 function safe(fn) { try { fn(); } catch (e) { console.warn('Render issue in ' + fn.name, e); } }
+/* ---------- offline snapshot (PWA) ---------- */
+function saveSnap() {
+  try {
+    const D = S.D, n = 72, h0 = Math.max(0, idxNow() - 2);
+    const H = {}; for (const k in D.hourly) H[k] = D.hourly[k].slice(h0, h0 + n);
+    localStorage.setItem('nx_snap', JSON.stringify({ t: Date.now(), unit: S.unit, loc: S.loc, D: { ...D, hourly: H } }));
+  } catch (e) { /* storage full: skip snapshot */ }
+}
+function useSnap() {
+  const snap = ls('snap', null);
+  if (!snap || !snap.D || snap.unit !== S.unit) return false;
+  S.D = snap.D; S.updated = new Date(snap.t); S.offline = true;
+  $('#loadingOverlay').classList.add('hidden'); $('#weatherContent').classList.remove('hidden'); $('#weatherContent').classList.add('flex');
+  safe(renderCore);
+  document.dispatchEvent(new CustomEvent('nx:data', { detail: { offline: true, t: snap.t } }));
+  return true;
+}
 async function loadAll(showSpinner) {
   if (!S.loc || loading) return; loading = true;
   if (showSpinner && !S.D) { $('#loadingOverlay').classList.remove('hidden'); $('#loadingText').textContent = 'Syncing satellite data...'; }
@@ -226,11 +244,15 @@ async function loadAll(showSpinner) {
     S.updated = new Date();
     $('#loadingOverlay').classList.add('hidden'); $('#weatherContent').classList.remove('hidden'); $('#weatherContent').classList.add('flex');
     safe(renderCore);
+    S.offline = false; saveSnap();
+    document.dispatchEvent(new CustomEvent('nx:data', { detail: { offline: false } }));
   } catch (e) {
+    loading = false;
+    if (useSnap()) return;
     console.warn('Forecast failed', e);
     $('#loadingOverlay').classList.remove('hidden');
     $('#loadingText').textContent = 'Could not load the forecast. Check your connection and try again.';
-    loading = false; return;
+    return;
   }
   loading = false;
   const today = S.D.current.time.slice(0, 10);

@@ -13,6 +13,10 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ccircle cx=%2250%22 cy=%2250%22 r=%2246%22 fill=%22%233b82f6%22/%3E%3Cpath d=%22M50 18 L62 50 L50 82 L38 50Z%22 fill=%22white%22/%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
@@ -28,8 +32,9 @@
         <span class="text-xl font-bold tracking-widest text-zinc-100 brand">NEXUS</span>
         <span class="text-[10px] font-bold tracking-widest text-blue-400 border border-blue-500/30 bg-blue-500/10 px-1.5 py-0.5 rounded-md">ULTIMATE</span>
       </a>
-      <div class="flex items-center gap-2 lg:hidden">
-        <span id="liveDotM" class="live-dot" title="Live"></span>
+      <div class="flex items-center gap-2">
+        <button id="installBtn" class="install-btn hidden" type="button"><i class="ph-bold ph-download-simple"></i> Install app</button>
+        <span id="liveDotM" class="live-dot lg:hidden" title="Live"></span>
       </div>
     </div>
 
@@ -60,6 +65,8 @@
   </div>
 </header>
 
+<div id="offlineBar" class="hidden sticky top-[57px] z-[999] bg-amber-500/15 border-b border-amber-500/30 text-amber-300 text-xs font-semibold text-center px-4 py-2"><i class="ph-bold ph-wifi-slash mr-1"></i><span id="offlineText">You're offline</span></div>
+
 <main class="max-w-7xl mx-auto px-3 md:px-4 py-5 md:py-8 flex flex-col gap-6 md:gap-8">
 
   <div class="flex items-center gap-2 overflow-x-auto hide-scrollbar pb-1" id="savedRow">
@@ -67,6 +74,7 @@
     <div id="savedChips" class="flex items-center gap-2"></div>
     <button id="saveBtn" class="chip-btn shrink-0"><i class="ph ph-plus"></i> Save</button>
     <span class="flex-1"></span>
+    <button id="cardBtn" class="chip-btn shrink-0" title="Share today as an image"><i class="ph ph-image"></i> Card</button>
     <button id="shareBtn" class="chip-btn shrink-0" title="Copy a shareable link"><i class="ph ph-share-network"></i> Share</button>
     <button id="exportBtn" class="chip-btn shrink-0" title="Download data"><i class="ph ph-download-simple"></i> Export</button>
   </div>
@@ -112,6 +120,18 @@
       </section>
     </div>
 
+    <!-- Rain nowcast + sun -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="card p-5 md:p-6" id="nowcastCard">
+        <h2 class="card-title"><i class="ph-fill ph-cloud-rain text-blue-400"></i> Next 2 Hours <span class="ml-auto text-[10px] font-bold tracking-widest text-blue-300 bg-blue-500/10 border border-blue-500/30 px-1.5 py-0.5 rounded-md">NOWCAST</span></h2>
+        <div id="nowcast"><p class="text-sm text-zinc-500">Loading...</p></div>
+      </section>
+      <section class="card p-5 md:p-6">
+        <h2 class="card-title"><i class="ph-fill ph-sun-horizon text-amber-400"></i> Sun &amp; Golden Hour</h2>
+        <div id="sunCard"><p class="text-sm text-zinc-500">Loading...</p></div>
+      </section>
+    </div>
+
     <!-- Instruments -->
     <div>
       <div class="section-head"><i class="ph-fill ph-gauge text-zinc-500 text-xl"></i><h2>Instruments</h2><span class="text-xs text-zinc-500">live conditions</span></div>
@@ -120,7 +140,7 @@
 
     <!-- Radar + 14 day -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <section class="card p-2 relative overflow-hidden lg:col-span-2 h-[440px] md:h-[520px]">
+      <section id="radarCard" class="card p-2 relative overflow-hidden lg:col-span-2 h-[440px] md:h-[520px] scroll-mt-24">
         <div class="absolute top-4 left-4 z-[400] map-pill"><i class="ph-fill ph-radar text-blue-400"></i> Live Radar</div>
         <div class="absolute bottom-4 left-4 right-4 z-[400] map-pill justify-between gap-3">
           <button id="radarPlay" class="text-blue-400 text-xl" aria-label="Play or pause radar"><i class="ph-fill ph-pause"></i></button>
@@ -138,6 +158,18 @@
         <div id="daily" class="flex flex-col gap-1.5 overflow-y-auto pr-1 hide-scrollbar flex-1"></div>
       </section>
     </div>
+
+    <!-- Notifications -->
+    <section class="card p-5 md:p-6 scroll-mt-24" id="notifyCard">
+      <div class="flex items-center gap-2 mb-1">
+        <h2 class="card-title !mb-0"><i class="ph-fill ph-bell-ringing text-blue-400"></i> Notifications</h2>
+        <span id="pushBadge" class="nbadge">OFF</span>
+      </div>
+      <p class="text-sm text-zinc-400 mb-4">Get pinged even when the app is closed. <span id="pushLoc"></span></p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2" id="pushTypes"></div>
+      <div class="flex flex-wrap items-center gap-2 mt-4" id="pushMain"></div>
+      <p id="pushStatus" class="text-xs mt-3 text-zinc-500">Rain and alert checks run about every 15 min.</p>
+    </section>
 
     <!-- AI + Recommendations -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -239,10 +271,23 @@
   <p>NEXUS Ultimate · auto-refreshes every 10 min. Data: Open-Meteo (forecast, models, archive, air quality, marine), National Weather Service (alerts, observations, official forecast), RainViewer (radar), NOAA SWPC (Kp index), BigDataCloud (city name), Zippopotam (ZIP), Pollinations (AI). No API keys.</p>
 </footer>
 
+<div id="cardModal" class="fixed inset-0 z-[3000] hidden items-center justify-center bg-black/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-label="Share weather card">
+  <div class="w-full max-w-sm flex flex-col gap-3">
+    <img id="cardImg" alt="Today's weather card" class="w-full rounded-3xl shadow-2xl border border-white/10">
+    <div class="flex gap-2">
+      <button id="cardShare" class="btn-primary flex-1 !py-3 flex items-center justify-center gap-2"><i class="ph-bold ph-share-network"></i> Share</button>
+      <button id="cardSave" class="btn-soft flex-1 justify-center"><i class="ph-bold ph-download-simple"></i> Save</button>
+      <button id="cardClose" class="btn-ghost" aria-label="Close"><i class="ph-bold ph-x"></i></button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-[2000] hidden px-4 py-2.5 rounded-full bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 shadow-2xl"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="app.js"></script>
+<script src="push-box.js"></script>
+<script src="extras.js"></script>
 </body>
 </html>
