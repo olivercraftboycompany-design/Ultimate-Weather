@@ -200,6 +200,11 @@ const ids = Object.keys(state.subs).sort((a, b) => (state.subs[b].at || 0) - (st
 for (const sid of ids.slice(5)) delete state.subs[sid];
 log(`${Object.keys(state.subs).length} subscriber(s)`);
 for (const sid of Object.keys(state.subs)) {
+  // honour the "Check every" choice from the app (5-60 min); the workflow itself wakes every ~5 min
+  const s = state.subs[sid], every = Math.min(60, Math.max(5, +(s.prefs && s.prefs.every) || 15));
+  const due = !s.lastCheck || NOW - s.lastCheck >= every * 60000 - 90000;
+  if (!due && !s.testPending && !FORCE_TEST) { log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
+  s.lastCheck = NOW;
   try { await checkWeather(state, sid); } catch (e) { log('check failed for', sid, e.message); }
 }
 state.lastRun = NOW;

@@ -204,7 +204,7 @@ function bindShareCard() {
 }
 
 /* ---------- push notifications ---------- */
-const DEF = { on: false, alerts: true, rain: true, morning: true, morningTime: '06:30', temp: true, loc: null, lastPost: 0, endpoint: null };
+const DEF = { on: false, alerts: true, rain: true, morning: true, morningTime: '06:30', temp: true, every: 15, loc: null, lastPost: 0, endpoint: null };
 let P = { ...DEF, ...ls('push', {}) };
 const TYPES = [
   ['alerts', 'ph-warning', 'text-red-400', 'Severe weather', 'NWS warnings, watches and advisories for your spot'],
@@ -216,7 +216,7 @@ const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in win
 function payload(sub) {
   const loc = P.loc || S().loc;
   return { v: 1, sub, lat: Math.round(loc.lat * 100) / 100, lon: Math.round(loc.lon * 100) / 100, name: (loc.name || '').split(',')[0].slice(0, 40),
-    unit: S().unit, prefs: { alerts: P.alerts, rain: P.rain, morning: P.morning, morningTime: P.morningTime, temp: P.temp },
+    unit: S().unit, prefs: { alerts: P.alerts, rain: P.rain, morning: P.morning, morningTime: P.morningTime, temp: P.temp, every: P.every || 15 },
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone };
 }
 async function saveConfig(sub) {
@@ -275,6 +275,7 @@ function renderPush() {
   $('#pushTypes').innerHTML = TYPES.map(t => `<label class="ntype"><i class="ph-fill ${t[1]} ${t[2]} text-xl"></i><span class="flex-1"><span class="block text-sm font-semibold text-zinc-200">${t[3]}</span><span class="block text-xs text-zinc-500">${t[4]}</span></span>${t[0] === 'morning' ? `<input type="time" id="pushTime" class="ntime" value="${P.morningTime}" aria-label="Morning forecast time">` : ''}<input type="checkbox" class="nsw" data-k="${t[0]}" ${P[t[0]] ? 'checked' : ''} aria-label="${t[3]}"></label>`).join('');
   document.querySelectorAll('#pushTypes .nsw').forEach(c => c.onchange = () => { P[c.dataset.k] = c.checked; prefChanged(); });
   $('#pushTime').onchange = e => { P.morningTime = e.target.value || '06:30'; prefChanged(); };
+  const ev = $('#pushEvery'); if (ev) { ev.value = String(P.every || 15); ev.onchange = e => { P.every = +e.target.value || 15; prefChanged(); if (!P.on) status('Saved. Turn on notifications to start the checks.'); }; }
   const b = id => document.getElementById(id);
   if (b('pushOn')) b('pushOn').onclick = enablePush;
   if (b('pushOff')) b('pushOff').onclick = disablePush;

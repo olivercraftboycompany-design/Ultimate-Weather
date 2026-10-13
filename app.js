@@ -200,7 +200,7 @@ function renderSaved() {
 
 /* ---------- data ---------- */
 const CUR = 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,dew_point_2m,visibility,uv_index,cape';
-const HR = 'temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,precipitation_probability,precipitation,weather_code,pressure_msl,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,visibility,wind_speed_10m,wind_direction_10m,wind_gusts_10m,wind_speed_80m,wind_speed_120m,wind_speed_180m,uv_index,cape,freezing_level_height,is_day,soil_temperature_0cm,soil_temperature_6cm,soil_temperature_18cm,soil_moisture_0_to_1cm,soil_moisture_1_to_3cm,soil_moisture_3_to_9cm,vapour_pressure_deficit';
+const HR = 'temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,precipitation_probability,precipitation,weather_code,pressure_msl,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,visibility,wind_speed_10m,wind_direction_10m,wind_gusts_10m,wind_speed_80m,wind_speed_120m,wind_speed_180m,uv_index,cape,freezing_level_height,is_day,soil_temperature_0cm,soil_temperature_6cm,soil_temperature_18cm,soil_moisture_0_to_1cm,soil_moisture_1_to_3cm,soil_moisture_3_to_9cm,vapour_pressure_deficit,shortwave_radiation,snow_depth,snowfall';
 const DY = 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,daylight_duration,sunshine_duration,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,et0_fao_evapotranspiration';
 const fcURL = model => `https://api.open-meteo.com/v1/forecast?latitude=${S.loc.lat}&longitude=${S.loc.lon}&current=${CUR}&hourly=${HR}&daily=${DY}&timezone=auto&past_days=1&forecast_days=16${unitQS()}${model && model !== 'best_match' ? '&models=' + model : ''}`;
 function mergeModel(best, m) {
@@ -258,7 +258,7 @@ async function loadAll(showSpinner) {
   const today = S.D.current.time.slice(0, 10);
   const ly = new Date(today + 'T12:00:00Z'); ly.setUTCFullYear(ly.getUTCFullYear() - 1); const lyd = ly.toISOString().slice(0, 10);
   const jobs = [
-    getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen&timezone=auto`).then(d => { S.AQ = d; }).catch(() => { S.AQ = null; }).finally(() => { safe(renderAir); safe(renderAqiGauge); }),
+    getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen&timezone=auto`).then(d => { S.AQ = d; }).catch(() => { S.AQ = null; }).finally(() => { safe(renderAir); safe(renderAqiGauge); safe(renderDeepAir); }),
     getJSON(`https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lon}&current=wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_period,sea_surface_temperature&timezone=auto${F() ? '&length_unit=imperial&temperature_unit=fahrenheit' : ''}`).then(d => { S.MR = d; }).catch(() => { S.MR = null; }).finally(() => safe(renderMarine)),
     getJSON(`https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${lyd}&end_date=${lyd}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max&timezone=auto${unitQS()}`).then(d => { S.LY = d; }).catch(() => { S.LY = null; }).finally(() => safe(renderLastYear)),
     getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max&models=ecmwf_ifs025,gfs_seamless,icon_seamless,jma_seamless&timezone=auto&forecast_days=10${unitQS()}`).then(d => { S.MC = d; safe(renderModels); }).catch(() => {}),
@@ -363,11 +363,125 @@ function renderGauges() {
   setFoot('cloud', `Low ${r0(H.cloud_cover_low[h0])} · Mid ${r0(H.cloud_cover_mid[h0])} · High ${r0(H.cloud_cover_high[h0])}`);
   moonGauge('g-moon');
   renderAqiGauge();
+  safe(renderDeep);
 }
 function renderAqiGauge() {
   const v = S.AQ && S.AQ.current ? S.AQ.current.us_aqi : null, ac = aqiCat(v);
   arcGauge('g-aqi', { value: v, min: 0, max: 300, stops: ['#4ade80', '#facc15', '#fb923c', '#ef4444', '#a855f7'], label: ac[0], labelColor: ac[1], aria: 'US AQI' });
   setFoot('aqi', v == null ? (S.AQ === null ? 'Unavailable' : 'Loading...') : `US AQI · PM2.5 ${r0(S.AQ.current.pm2_5)}`);
+}
+
+/* ---------- deep data: extra gauges + 24h trend sparklines ---------- */
+const DEEP = [
+  ['temp', 'ph-thermometer-simple', 'text-orange-400', 'Temperature'], ['gust', 'ph-wind', 'text-teal-300', 'Wind Gusts'],
+  ['aloft', 'ph-airplane-tilt', 'text-sky-300', 'Wind Aloft'], ['solar', 'ph-sun', 'text-amber-400', 'Solar Power'],
+  ['sunshine', 'ph-sun-dim', 'text-yellow-400', 'Sunshine Today'], ['storm', 'ph-lightning', 'text-fuchsia-400', 'Storm Energy'],
+  ['pm25', 'ph-circles-three', 'text-lime-400', 'PM2.5'], ['pm10', 'ph-circles-four', 'text-emerald-400', 'PM10'],
+  ['ozone', 'ph-atom', 'text-cyan-300', 'Ozone'], ['pollen', 'ph-flower', 'text-pink-400', 'Pollen'],
+  ['soil', 'ph-plant', 'text-green-500', 'Soil Temp'], ['freeze', 'ph-snowflake', 'text-blue-300', 'Freezing Level'],
+  ['snow', 'ph-cloud-snow', 'text-slate-200', 'Snow']
+];
+const TRENDS = [
+  ['pressure_msl', 'Pressure', 'ph-arrows-in-line-vertical', '#a855f7', v => F() ? (v * 0.02953).toFixed(2) + ' inHg' : Math.round(v) + ' hPa'],
+  ['relative_humidity_2m', 'Humidity', 'ph-drop-half', '#22d3ee', v => Math.round(v) + '%'],
+  ['wind_speed_10m', 'Wind', 'ph-wind', '#2dd4bf', v => Math.round(v) + ' ' + wU()]
+];
+function buildDeepGrid() {
+  const g = $('#deepGrid'); if (!g) return;
+  g.innerHTML = DEEP.map(([k, ic, col, t]) => `<div class="card gcard" id="dc-${k}"><div class="ghead"><i class="ph-fill ${ic} ${col}"></i>${t}</div><div class="gbody" id="g-${k}"></div><div class="gfoot" id="gf-${k}"></div></div>`).join('');
+  $('#trendGrid').innerHTML = TRENDS.map(([k, t, ic, col]) => `<div class="card trend-card"><div class="ghead"><i class="ph-fill ${ic}" style="color:${col}"></i>${t}<span class="ml-auto text-xs text-zinc-500" id="tr-${k}-d"></span></div><div class="trend-now" id="tr-${k}-v">--</div><div id="tr-${k}"></div><div class="trend-axis"><span>-12h</span><span>now</span><span>+12h</span></div></div>`).join('');
+}
+function sparkline(el, vals, nowI, color) {
+  if (typeof el === 'string') el = document.getElementById(el);
+  const pts = vals.map((v, i) => [i, num(v)]).filter(p => p[1] != null);
+  if (!el || pts.length < 3) { if (el) el.innerHTML = '<div class="text-xs text-zinc-500 py-4 text-center">No trend data</div>'; return; }
+  const W = 300, Hh = 64, n = vals.length - 1, lo = Math.min(...pts.map(p => p[1])), hi = Math.max(...pts.map(p => p[1])), span = (hi - lo) || 1;
+  const X = i => i / n * W, Y = v => Hh - 6 - (v - lo) / span * (Hh - 14);
+  const line = pts.map((p, j) => (j ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join(' ');
+  const id = 'sp' + (++gid), nx = X(nowI), nowV = num(vals[nowI]);
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" preserveAspectRatio="none" class="spark" role="img" aria-label="24 hour trend"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color}" stop-opacity=".35"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${line} L ${X(pts[pts.length - 1][0]).toFixed(1)} ${Hh} L ${X(pts[0][0]).toFixed(1)} ${Hh} Z" fill="url(#${id})"/>
+    <path d="${line}" fill="none" stroke="${color}" stroke-width="2.2" vector-effect="non-scaling-stroke" stroke-linejoin="round" class="spark-line"/>
+    <line x1="${nx}" x2="${nx}" y1="0" y2="${Hh}" stroke="#fafafa" stroke-opacity=".35" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+    ${nowV == null ? '' : `<circle cx="${nx}" cy="${Y(nowV)}" r="3.5" fill="#fafafa" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`}</svg>`;
+}
+function renderDeep() {
+  if (!$('#deepGrid')) return;
+  const c = S.D.current, H = S.D.hourly, d = S.D.daily, h0 = idxNow(), ti = todayIdx();
+  const at = (k, i = h0) => H[k] ? num(H[k][i]) : null;
+  // trends: 12h back, 12h ahead
+  const a = Math.max(0, h0 - 12), b = Math.min(H.time.length - 1, h0 + 12);
+  TRENDS.forEach(([k, , , col, fmt]) => {
+    const vals = (H[k] || []).slice(a, b + 1);
+    sparkline('tr-' + k, vals, h0 - a, col);
+    const now = at(k), past = at(k, a), fut = at(k, b);
+    $('#tr-' + k + '-v').textContent = now == null ? '--' : fmt(now);
+    const dd = $('#tr-' + k + '-d');
+    if (k === 'pressure_msl' && now != null && at(k, Math.max(0, h0 - 3)) != null) { const t3 = now - at(k, Math.max(0, h0 - 3)); dd.innerHTML = t3 > 0.8 ? '↗ rising' : t3 < -0.8 ? '↘ falling' : '→ steady'; }
+    else if (fut != null && now != null) { const lo = Math.min(...vals.filter(v => v != null)), hi = Math.max(...vals.filter(v => v != null)); dd.textContent = `${fmt(lo)} – ${fmt(hi)}`; }
+  });
+  // temperature with today's range
+  const t = c.temperature_2m, tF = F() ? t : toF(t), hi = d.temperature_2m_max[ti], lo = d.temperature_2m_min[ti];
+  arcGauge('g-temp', { value: tF, min: -10, max: 110, display: Math.round(t), unit: tU(), stops: ['#818cf8', '#38bdf8', '#4ade80', '#facc15', '#ef4444'], aria: 'Temperature' });
+  setFoot('temp', `H <b class="text-zinc-300">${deg(hi)}</b> · L <b class="text-zinc-300">${deg(lo)}</b>`);
+  // gusts
+  const kmh = v => v == null ? null : F() ? v * 1.609 : v, g = c.wind_gusts_10m;
+  const gc = kmh(g) == null ? ['--', '#a1a1aa'] : kmh(g) < 30 ? ['Calm', '#4ade80'] : kmh(g) < 50 ? ['Breezy', '#facc15'] : kmh(g) < 75 ? ['Gusty', '#fb923c'] : ['Damaging', '#ef4444'];
+  arcGauge('g-gust', { value: kmh(g), min: 0, max: 100, display: r0(g), unit: wU(), stops: ['#4ade80', '#facc15', '#fb923c', '#ef4444'], label: gc[0], labelColor: gc[1], aria: 'Wind gusts' });
+  setFoot('gust', `Peak today <b class="text-zinc-300">${r0(d.wind_gusts_10m_max[ti])} ${wU()}</b>`);
+  // wind aloft (120 m)
+  const al = at('wind_speed_120m');
+  arcGauge('g-aloft', { value: kmh(al), min: 0, max: 100, display: r0(al), unit: wU(), stops: ['#a5b4fc', '#38bdf8', '#2563eb'], aria: 'Wind at 120 meters' });
+  setFoot('aloft', `At 120 m · 180 m: ${r0(at('wind_speed_180m'))}`);
+  // solar radiation
+  const sr = at('shortwave_radiation');
+  arcGauge('g-solar', { value: sr, min: 0, max: 1000, unit: 'W/m²', stops: ['#52525b', '#facc15', '#f97316'], label: sr == null ? '' : sr < 50 ? (c.is_day ? 'Dim' : 'Night') : sr < 300 ? 'Weak' : sr < 650 ? 'Strong' : 'Intense', labelColor: '#fbbf24', aria: 'Solar radiation' });
+  setFoot('solar', 'Sunlight hitting the ground');
+  // sunshine today
+  const ss = d.sunshine_duration[ti], dl = d.daylight_duration[ti], sp = ss != null && dl ? ss / dl * 100 : null;
+  arcGauge('g-sunshine', { value: sp, min: 0, max: 100, unit: '%', stops: ['#64748b', '#fde047', '#facc15'], aria: 'Sunshine today' });
+  setFoot('sunshine', ss == null ? '' : `${Math.floor(ss / 3600)}h ${Math.round(ss % 3600 / 60)}m of sun expected`);
+  // storm energy (CAPE)
+  const cp = c.cape ?? at('cape'), cc = cp == null ? ['--', '#a1a1aa'] : cp < 300 ? ['Stable', '#4ade80'] : cp < 1000 ? ['Marginal', '#facc15'] : cp < 2500 ? ['Unstable', '#fb923c'] : ['Explosive', '#ef4444'];
+  arcGauge('g-storm', { value: cp, min: 0, max: 3500, unit: 'J/kg', stops: ['#4ade80', '#facc15', '#fb923c', '#ef4444', '#a855f7'], label: cc[0], labelColor: cc[1], aria: 'Storm energy CAPE' });
+  setFoot('storm', `Max next 24h ${r0(Math.max(0, ...((H.cape || []).slice(h0, h0 + 24).filter(v => v != null))))}`);
+  // soil
+  const st = at('soil_temperature_6cm') ?? at('soil_temperature_0cm'), stF = st == null ? null : F() ? st : toF(st);
+  arcGauge('g-soil', { value: stF, min: 20, max: 100, display: r0(st), unit: tU(), stops: ['#38bdf8', '#4ade80', '#a3e635', '#f97316'], label: stF == null ? '' : stF < 32 ? 'Frozen' : stF < 50 ? 'Cold' : stF < 65 ? 'Planting OK' : 'Warm', labelColor: '#86efac', aria: 'Soil temperature' });
+  setFoot('soil', `6 cm deep · surface ${deg(at('soil_temperature_0cm'))}`);
+  // freezing level
+  const fzD = at('freezing_level_height'), fz = fzD == null ? null : F() ? fzD / 3.281 : fzD; // API sends ft in imperial mode
+  arcGauge('g-freeze', { value: fz, min: 0, max: 5000, display: fzD == null ? '--' : fzD >= 10000 ? (fzD / 1000).toFixed(1) + 'k' : Math.round(fzD).toLocaleString(), unit: F() ? 'ft' : 'm', stops: ['#e0f2fe', '#38bdf8', '#1d4ed8'], aria: 'Freezing level' });
+  setFoot('freeze', fz == null ? '' : fz < 300 ? 'Snow can reach the ground' : 'Height where it hits 32°');
+  // snow
+  const sd = at('snow_depth'), sf24 = (H.snowfall || []).slice(h0, h0 + 24).reduce((s, v) => s + (v || 0), 0);
+  const sdD = sd == null ? null : F() ? sd * 12 : sd * 100, sfD = sf24; // API: ft + inch (imperial) or m + cm
+  arcGauge('g-snow', { value: sdD, min: 0, max: F() ? 24 : 60, display: sdD == null ? '--' : sdD < 0.05 ? '0' : sdD.toFixed(1), unit: F() ? 'in' : 'cm', stops: ['#cbd5e1', '#e2e8f0', '#ffffff'], label: sdD != null && sdD >= 0.05 ? 'On ground' : 'No snow', labelColor: '#cbd5e1', aria: 'Snow depth' });
+  setFoot('snow', `Next 24h <b class="text-zinc-300">${sfD.toFixed(1)} ${F() ? 'in' : 'cm'}</b> snowfall`);
+  renderDeepAir();
+}
+function renderDeepAir() {
+  if (!$('#deepGrid')) return;
+  const A = S.AQ && S.AQ.current, wait = S.AQ === null ? 'Unavailable' : 'Loading...';
+  const v = k => A ? num(A[k]) : null;
+  const pm25 = v('pm2_5'), pm10 = v('pm10'), oz = v('ozone');
+  const c25 = pm25 == null ? ['--', '#a1a1aa'] : pm25 <= 9 ? ['Good', '#4ade80'] : pm25 <= 35.4 ? ['Moderate', '#facc15'] : pm25 <= 55.4 ? ['Sensitive', '#fb923c'] : ['Unhealthy', '#ef4444'];
+  arcGauge('g-pm25', { value: pm25, min: 0, max: 75, display: pm25 == null ? '--' : pm25.toFixed(1), unit: 'µg/m³', stops: ['#4ade80', '#facc15', '#fb923c', '#ef4444'], label: c25[0], labelColor: c25[1], aria: 'PM2.5' });
+  setFoot('pm25', A ? 'Fine particles (smoke, exhaust)' : wait);
+  const c10 = pm10 == null ? ['--', '#a1a1aa'] : pm10 <= 54 ? ['Good', '#4ade80'] : pm10 <= 154 ? ['Moderate', '#facc15'] : ['Unhealthy', '#ef4444'];
+  arcGauge('g-pm10', { value: pm10, min: 0, max: 200, unit: 'µg/m³', stops: ['#4ade80', '#facc15', '#ef4444'], label: c10[0], labelColor: c10[1], aria: 'PM10' });
+  setFoot('pm10', A ? 'Dust and pollen-size particles' : wait);
+  const co = oz == null ? ['--', '#a1a1aa'] : oz <= 100 ? ['Good', '#4ade80'] : oz <= 160 ? ['Moderate', '#facc15'] : ['High', '#ef4444'];
+  arcGauge('g-ozone', { value: oz, min: 0, max: 240, unit: 'µg/m³', stops: ['#4ade80', '#facc15', '#ef4444'], label: co[0], labelColor: co[1], aria: 'Ozone' });
+  setFoot('ozone', A ? 'Ground-level ozone' : wait);
+  const PK = [['grass_pollen', 'Grass'], ['ragweed_pollen', 'Ragweed'], ['birch_pollen', 'Birch'], ['alder_pollen', 'Alder'], ['mugwort_pollen', 'Mugwort'], ['olive_pollen', 'Olive']];
+  const pv = PK.map(([k, n]) => [n, v(k)]).filter(p => p[1] != null);
+  const card = $('#dc-pollen');
+  if (!pv.length) { if (card) card.classList.toggle('hidden', !!A); arcGauge('g-pollen', { value: null, min: 0, max: 100 }); setFoot('pollen', A ? 'Not tracked here' : wait); return; }
+  if (card) card.classList.remove('hidden');
+  const top = pv.reduce((x, y) => y[1] > x[1] ? y : x), pc = top[1] < 10 ? ['Low', '#4ade80'] : top[1] < 50 ? ['Moderate', '#facc15'] : top[1] < 200 ? ['High', '#fb923c'] : ['Very high', '#ef4444'];
+  arcGauge('g-pollen', { value: top[1], min: 0, max: 200, display: Math.round(top[1]), unit: 'grains', stops: ['#4ade80', '#facc15', '#fb923c', '#ef4444'], label: pc[0], labelColor: pc[1], aria: 'Pollen' });
+  setFoot('pollen', `Top: ${top[0]}`);
 }
 
 /* ---------- charts ---------- */
@@ -743,7 +857,7 @@ function bindControls() {
 
 /* ---------- boot ---------- */
 async function boot() {
-  applyTheme(); applyUnitUI(); buildGaugeGrid(); bindSearch(); bindControls(); bindAI(); renderSaved();
+  applyTheme(); applyUnitUI(); buildGaugeGrid(); buildDeepGrid(); bindSearch(); bindControls(); bindAI(); renderSaved();
   const q = new URLSearchParams(location.search);
   if (q.get('lat') && q.get('lon')) await setLocation({ lat: +q.get('lat'), lon: +q.get('lon'), name: q.get('name') || await reverseName(q.get('lat'), q.get('lon')) });
   else if (!(await useGPS(true))) {
@@ -751,7 +865,10 @@ async function boot() {
     await setLocation(last || { lat: 41.5868, lon: -93.625, name: 'Des Moines, IA' });
     toast(last ? 'Showing your last location. Tap the arrow to use GPS.' : 'Location is off. Showing Des Moines. Search or tap the arrow.');
   }
-  setInterval(() => { if (!document.hidden) loadAll(false); }, 10 * 60 * 1000);
+  // refresh while the app is open, at the interval picked in Notifications ("Check every"), default 10 min
+  let lastAuto = Date.now();
+  setInterval(() => { const ev = (+(ls('push', {}).every) || 10) * 60000; if (!document.hidden && Date.now() - lastAuto >= ev) { lastAuto = Date.now(); loadAll(false); } }, 30000);
+  document.addEventListener('visibilitychange', () => { const ev = (+(ls('push', {}).every) || 10) * 60000; if (!document.hidden && Date.now() - lastAuto >= ev) { lastAuto = Date.now(); loadAll(false); } });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.updated && Date.now() - S.updated > 10 * 60 * 1000) loadAll(false); });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

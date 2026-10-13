@@ -138,6 +138,13 @@
       <div id="gaugeGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-5"></div>
     </div>
 
+    <!-- Deep data -->
+    <div id="deepData">
+      <div class="section-head"><i class="ph-fill ph-chart-donut text-zinc-500 text-xl"></i><h2>Deep Data</h2><span class="text-xs text-zinc-500">more gauges + 24h trends</span></div>
+      <div id="trendGrid" class="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-5 mb-3 md:mb-5"></div>
+      <div id="deepGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-5"></div>
+    </div>
+
     <!-- Radar + 14 day -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <section id="radarCard" class="card p-2 relative overflow-hidden lg:col-span-2 h-[440px] md:h-[520px] scroll-mt-24">
@@ -167,8 +174,9 @@
       </div>
       <p class="text-sm text-zinc-400 mb-4">Get pinged even when the app is closed. <span id="pushLoc"></span></p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-2" id="pushTypes"></div>
+      <div class="ntype mt-2" id="pushEveryRow"><i class="ph-fill ph-timer text-blue-400 text-xl"></i><span class="flex-1"><span class="block text-sm font-semibold text-zinc-200">Check every</span><span class="block text-xs text-zinc-500">How often to check for rain + alerts. GitHub may run a few minutes late.</span></span><select id="pushEvery" class="ntime" aria-label="Check every"><option value="5">5 min</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select></div>
       <div class="flex flex-wrap items-center gap-2 mt-4" id="pushMain"></div>
-      <p id="pushStatus" class="text-xs mt-3 text-zinc-500">Rain and alert checks run about every 15 min.</p>
+      <p id="pushStatus" class="text-xs mt-3 text-zinc-500"></p>
     </section>
 
     <!-- AI + Recommendations -->

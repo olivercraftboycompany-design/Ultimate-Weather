@@ -2,8 +2,12 @@ name: Weather push notifications
 
 on:
   schedule:
-    # GitHub runs scheduled jobs "best effort": usually every 15-20 min, sometimes later at busy times.
-    - cron: '7,22,37,52 * * * *'
+    # Wakes every 5 min (GitHub's minimum; it often runs a few minutes late). Each device's own
+    # "Check every" setting (5-60 min) decides whether its weather gets checked on a given run.
+    - cron: '*/5 * * * *'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/weather-push.yml', '.github/push/**']
   workflow_dispatch:
     inputs:
       test:
