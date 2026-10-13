@@ -1,4 +1,5 @@
-// NEXUS Ultimate push sender. Runs in GitHub Actions every ~15 min (see .github/workflows/weather-push.yml).
+// NEXUS Ultimate push sender. Runs in GitHub Actions (see .github/workflows/weather-push.yml).
+// One quick pass ("check" job), then a watch loop (LOOP_MINUTES) that checks every minute and hands off to the next run.
 // Reads sealed subscriptions from ntfy.sh, checks the weather, sends Web Push (VAPID) notifications.
 // State (subscriptions + what was already sent) is encrypted and kept in the Actions cache, never in the repo.
 import webpush from 'web-push';
@@ -9,9 +10,11 @@ import path from 'node:path';
 const env = process.env;
 const TOPIC = env.NTFY_TOPIC;
 const STATE_FILE = path.join(env.STATE_DIR || '.state', 'state.bin');
-const FORCE_TEST = env.FORCE_TEST === 'true';
+let FORCE_TEST = env.FORCE_TEST === 'true';
 const DRY = env.DRY_RUN === 'true';
-const NOW = env.NOW_OVERRIDE ? Date.parse(env.NOW_OVERRIDE) : Date.now();
+let NOW = env.NOW_OVERRIDE ? Date.parse(env.NOW_OVERRIDE) : Date.now();
+const LOOP_MINUTES = +env.LOOP_MINUTES || 0;
+const TICK_MS = (+env.TICK_SECONDS || 60) * 1000;
 const UA = 'NEXUS-Ultimate-Weather (github.com/olivercraftboycompany-design/Ultimate-Weather)';
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
@@ -58,7 +61,7 @@ const EMO = c => c === 0 ? '☀️' : c <= 2 ? '⛅' : c === 3 ? '☁️' : c <=
 const hhmm = iso => { let [h, m] = iso.slice(11, 16).split(':').map(Number); const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return m ? `${h}:${String(m).padStart(2, '0')} ${ap}` : `${h} ${ap}`; };
 
 /* ---------- 1) read new messages from ntfy ---------- */
-async function readInbox(state) {
+async function readInbox(state, verbose = true) {
   const since = state.since || 'all';
   let txt = '';
   try { const r = await fetch(`https://ntfy.sh/${TOPIC}/json?poll=1&since=${encodeURIComponent(since)}`); txt = r.ok ? await r.text() : ''; if (!r.ok) log('ntfy', r.status); }
@@ -69,7 +72,7 @@ async function readInbox(state) {
     state.since = m.id;
     try { const p = open(m.message); p._at = m.time * 1000; out.push(p); } catch (e) { log('skipped a message we could not open'); }
   }
-  log(`ntfy: ${msgs.length} new message(s), ${out.length} readable`);
+  if (verbose || msgs.length) log(`ntfy: ${msgs.length} new message(s), ${out.length} readable`);
   return out;
 }
 
@@ -102,10 +105,12 @@ async function checkWeather(state, sid) {
   let W;
   try { W = await getJSON(u); } catch (e) { log('open-meteo failed', e.message); return; }
   const off = W.utc_offset_seconds * 1000, local = new Date(NOW + off);
+  s.off = off;
   const today = local.toISOString().slice(0, 10), mins = local.getUTCHours() * 60 + local.getUTCMinutes();
   const nowISO = local.toISOString().slice(0, 16);
   const D = W.daily, ti = Math.max(0, D.time.indexOf(today)), c = W.current;
   const place = s.name ? ` in ${s.name}` : '';
+  log(`  weather read: ${Math.round(c.temperature_2m)}${deg}, ${WXT[c.weather_code] || c.weather_code}; prefs alerts=${p.alerts !== false} rain=${p.rain !== false} morning=${p.morning !== false} temp=${p.temp !== false} every=${p.every || 15}min`);
 
   // test request from the app
   if (s.testPending || FORCE_TEST) {
@@ -117,6 +122,7 @@ async function checkWeather(state, sid) {
   if (p.alerts !== false) {
     try {
       const A = await getJSON(`https://api.weather.gov/alerts/active?point=${s.lat},${s.lon}`, { headers: { 'User-Agent': UA, Accept: 'application/geo+json' } }, 12000);
+      log(`  NWS alerts: ${(A.features || []).length} active for this spot${(A.features || []).length ? ' (' + A.features.map(f => f.properties.event).join(', ') + ')' : ''}`);
       for (const f of A.features || []) {
         const a = f.properties; if (a.status !== 'Actual' || a.messageType === 'Cancel') continue;
         const id = a.id || f.id; if (sent.alerts[id]) continue;
@@ -144,6 +150,7 @@ async function checkWeather(state, sid) {
     let hit = -1; for (let k = i0 + 1; k <= i0 + 4 && k < M.time.length; k++) if ((M.precipitation[k] || 0) >= thr) { hit = k; break; }
     const hi = W.hourly.time.findIndex(t => t.slice(0, 13) === nowISO.slice(0, 13));
     const pNext = hi >= 0 ? Math.max(W.hourly.precipitation_probability[hi + 1] || 0, W.hourly.precipitation_probability[hi] || 0) : 0;
+    log(`  rain next hour: ${wetNow ? 'already wet now' : hit >= 0 ? 'starts around ' + M.time[hit].slice(11) : 'none expected'} (hourly chance ${pNext}%)`);
     const dryLongEnough = sent.dryAt && NOW - sent.dryAt >= 45 * 60000;
     const cooled = NOW - (sent.rainAt || 0) > 3 * 3600000;
     if (!wetNow && hit >= 0 && (pNext >= 30 || (M.precipitation[hit] || 0) >= thr * 3) && cooled && (dryLongEnough || !sent.rainAt)) {
@@ -158,19 +165,25 @@ async function checkWeather(state, sid) {
   // morning summary
   if (p.morning !== false) {
     const [mh, mm] = (p.morningTime || '06:30').split(':').map(Number), target = mh * 60 + mm;
-    if (sent.morning !== today && mins >= target - 10 && mins <= target + 150) {
+    const mDue = sent.morning !== today && mins >= target && mins <= target + 150;
+    log(`  morning summary: on, target ${p.morningTime || '06:30'}, local ${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}, sent today: ${sent.morning === today ? 'yes' : 'no'} → ${mDue ? 'SEND' : 'not now'}`);
+    if (mDue) {
+      const late = mins - target > 20;
       const hi = Math.round(D.temperature_2m_max[ti]), lo = Math.round(D.temperature_2m_min[ti]);
       const H = W.hourly, dayIdx = H.time.map((t, k) => [t, k]).filter(([t]) => t.startsWith(today) && +t.slice(11, 13) >= 6 && +t.slice(11, 13) <= 22);
       const wet = dayIdx.filter(([, k]) => (H.precipitation_probability[k] || 0) >= 40);
       let note;
       if (wet.length) { const peak = wet.reduce((a, b) => (H.precipitation_probability[b[1]] > H.precipitation_probability[a[1]] ? b : a)); note = `${H.precipitation_probability[peak[1]]}% chance of ${H.weather_code[peak[1]] >= 71 && H.weather_code[peak[1]] <= 86 ? 'snow' : 'rain'} around ${hhmm(peak[0])}, bring an umbrella ☔`; }
       else note = (D.precipitation_probability_max[ti] || 0) >= 20 ? `Low rain chance (${D.precipitation_probability_max[ti]}%).` : 'No rain expected.';
+      // the daily code can say "rain" for a stray overnight drizzle; if no daytime hour is wet, describe the day by its most common daytime sky
+      let dcode = D.weather_code[ti];
+      if (!wet.length && dcode >= 51 && dayIdx.length) { const cnt = {}; for (const [, k] of dayIdx) cnt[H.weather_code[k]] = (cnt[H.weather_code[k]] || 0) + 1; dcode = +Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0]; }
       const feels = Math.round(c.apparent_temperature);
       const wear = F ? (feels < 32 ? 'Big coat weather 🧥' : feels < 50 ? 'Jacket weather 🧥' : feels < 65 ? 'Hoodie weather' : feels < 80 ? 'T-shirt weather 👕' : 'Hot one, stay cool 🥵') : (feels < 0 ? 'Big coat weather 🧥' : feels < 10 ? 'Jacket weather 🧥' : feels < 18 ? 'Hoodie weather' : feels < 27 ? 'T-shirt weather 👕' : 'Hot one, stay cool 🥵');
-      await push(state, sid, { title: `${EMO(D.weather_code[ti])} Good morning! High ${hi}${deg} · Low ${lo}${deg}`, body: `${WXT[D.weather_code[ti]] || ''} today${place}. ${note} It's ${Math.round(c.temperature_2m)}${deg} now (feels ${feels}${deg}). ${wear}.`, tag: 'nexus-morning', url: './' }, { ttl: 3 * 3600 });
+      await push(state, sid, { title: `${EMO(dcode)} ${late ? 'Morning summary (sorry it\'s late!)' : 'Good morning!'} High ${hi}${deg} · Low ${lo}${deg}`, body: `${WXT[dcode] || ''} today${place}. ${note} It's ${Math.round(c.temperature_2m)}${deg} now (feels ${feels}${deg}). ${wear}.`, tag: 'nexus-morning', url: './' }, { ttl: 3 * 3600 });
       sent.morning = today;
     }
-  }
+  } else log('  morning summary: off in settings');
 
   // freeze or big temperature drop tomorrow (evening heads-up)
   if (p.temp !== false && sent.temp !== today && mins >= 15 * 60 && mins <= 22 * 60 && D.time[ti + 1]) {
@@ -186,27 +199,51 @@ async function checkWeather(state, sid) {
 
 /* ---------- main ---------- */
 const state = loadState(); state.subs ||= {};
-for (const m of await readInbox(state)) {
-  if (m.type === 'unsub') { const sid = m.endpoint && idOf(m.endpoint); if (sid && state.subs[sid]) { delete state.subs[sid]; log('unsubscribed', sid); } continue; }
-  if (!m.sub || !m.sub.endpoint || !m.sub.keys) continue;
-  if (!/^https:\/\//.test(m.sub.endpoint)) continue;
-  const sid = idOf(m.sub.endpoint), prev = state.subs[sid] || {};
-  state.subs[sid] = { ...prev, sub: m.sub, lat: Math.round(+m.lat * 100) / 100, lon: Math.round(+m.lon * 100) / 100, name: String(m.name || '').slice(0, 40), unit: m.unit === 'C' ? 'C' : 'F', prefs: m.prefs || {}, at: m._at };
-  if (m.type === 'test') state.subs[sid].testPending = true;
-  log(`${prev.sub ? 'updated' : 'new'} subscriber ${sid} (${m.type})`);
+const minsLocal = (s) => { const l = new Date(NOW + (s.off || 0)); return [l.toISOString().slice(0, 10), l.getUTCHours() * 60 + l.getUTCMinutes()]; };
+function morningDue(s) {
+  const p = s.prefs || {}; if (p.morning === false || s.off == null) return false;
+  const [mh, mm] = (p.morningTime || '06:30').split(':').map(Number), target = mh * 60 + mm;
+  const [today, mins] = minsLocal(s);
+  return (s.sent || {}).morning !== today && mins >= target && mins <= target + 150;
 }
-// keep the 5 most recent devices
-const ids = Object.keys(state.subs).sort((a, b) => (state.subs[b].at || 0) - (state.subs[a].at || 0));
-for (const sid of ids.slice(5)) delete state.subs[sid];
-log(`${Object.keys(state.subs).length} subscriber(s)`);
-for (const sid of Object.keys(state.subs)) {
-  // honour the "Check every" choice from the app (5-60 min); the workflow itself wakes every ~5 min
-  const s = state.subs[sid], every = Math.min(60, Math.max(5, +(s.prefs && s.prefs.every) || 15));
-  const due = !s.lastCheck || NOW - s.lastCheck >= every * 60000 - 90000;
-  if (!due && !s.testPending && !FORCE_TEST) { log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
-  s.lastCheck = NOW;
-  try { await checkWeather(state, sid); } catch (e) { log('check failed for', sid, e.message); }
+async function cycle(verbose) {
+  NOW = Date.now();
+  for (const m of await readInbox(state, verbose)) {
+    if (m.type === 'unsub') { const sid = m.endpoint && idOf(m.endpoint); if (sid && state.subs[sid]) { delete state.subs[sid]; log('unsubscribed', sid); } continue; }
+    if (!m.sub || !m.sub.endpoint || !m.sub.keys) continue;
+    if (!/^https:\/\//.test(m.sub.endpoint)) continue;
+    const sid = idOf(m.sub.endpoint), prev = state.subs[sid] || {};
+    state.subs[sid] = { ...prev, sub: m.sub, lat: Math.round(+m.lat * 100) / 100, lon: Math.round(+m.lon * 100) / 100, name: String(m.name || '').slice(0, 40), unit: m.unit === 'C' ? 'C' : 'F', prefs: m.prefs || {}, at: m._at };
+    if (m.type === 'test') state.subs[sid].testPending = true;
+    log(`${prev.sub ? 'updated' : 'new'} subscriber ${sid} (${m.type})`);
+  }
+  // keep the 5 most recent devices
+  const ids = Object.keys(state.subs).sort((a, b) => (state.subs[b].at || 0) - (state.subs[a].at || 0));
+  for (const sid of ids.slice(5)) delete state.subs[sid];
+  if (verbose) log(`${Object.keys(state.subs).length} subscriber(s)`);
+  for (const sid of Object.keys(state.subs)) {
+    // honour the "Check every" choice from the app (5-60 min); the morning summary and tests don't wait for it
+    const s = state.subs[sid], every = Math.min(60, Math.max(5, +(s.prefs && s.prefs.every) || 15));
+    const due = !s.lastCheck || NOW - s.lastCheck >= every * 60000 - 30000;
+    const md = morningDue(s);
+    if (!due && !md && !s.testPending && !FORCE_TEST) { if (verbose) log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
+    log(`checking ${sid} (every ${every} min${md ? ', morning summary due' : ''}${s.testPending || FORCE_TEST ? ', test requested' : ''})`);
+    s.lastCheck = NOW;
+    try { await checkWeather(state, sid); } catch (e) { log('check failed for', sid, e.message); }
+  }
+  FORCE_TEST = false;
+  state.lastRun = NOW;
+  saveState(state);
 }
-state.lastRun = NOW;
-saveState(state);
+const started = Date.now();
+await cycle(true);
+if (LOOP_MINUTES > 0) {
+  log(`watching: one pass a minute for ${LOOP_MINUTES} min`);
+  let n = 0;
+  while (Date.now() - started + TICK_MS < LOOP_MINUTES * 60000) {
+    await new Promise(r => setTimeout(r, TICK_MS));
+    try { await cycle(false); } catch (e) { log('cycle failed', e.message); }
+    if (++n % 15 === 0) log(`still watching (${Math.round((Date.now() - started) / 60000)} min)`);
+  }
+}
 log('done');

@@ -1,13 +1,12 @@
 name: Weather push notifications
 
+# How this stays on time: GitHub's own cron is best-effort (on this repo it never fired at all),
+# so each run checks once ("check"), then watches for ~55 min checking every minute ("watch"),
+# then starts the next run itself (workflow_dispatch with GITHUB_TOKEN). The cron below is only
+# a backstop that restarts the chain if a hand-off ever fails.
 on:
   schedule:
-    # Wakes every 5 min (GitHub's minimum; it often runs a few minutes late). Each device's own
-    # "Check every" setting (5-60 min) decides whether its weather gets checked on a given run.
-    - cron: '*/5 * * * *'
-  push:
-    branches: [main]
-    paths: ['.github/workflows/weather-push.yml', '.github/push/**']
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
     inputs:
       test:
@@ -17,14 +16,18 @@ on:
 
 permissions:
   contents: read
-  actions: write   # lets the job tidy up its own old state caches
+  actions: write   # start the next run + tidy old state caches
 
 concurrency:
   group: weather-push
   cancel-in-progress: false
 
+env:
+  NTFY_TOPIC: uw-sub-82bf0d55533924ae6683811a
+  STATE_DIR: .state
+
 jobs:
-  send:
+  check:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -49,20 +52,65 @@ jobs:
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
           BOX_PRIVATE: ${{ secrets.BOX_PRIVATE }}
-          NTFY_TOPIC: uw-sub-82bf0d55533924ae6683811a
-          STATE_DIR: .state
           FORCE_TEST: ${{ github.event.inputs.test == 'true' }}
       - name: Save state
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .state
-          key: uw-state-${{ github.run_id }}-${{ github.run_attempt }}
+          key: uw-state-${{ github.run_id }}-${{ github.run_attempt }}-check
+
+  watch:
+    needs: check
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/push
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: uw-state-${{ github.run_id }}-${{ github.run_attempt }}-check
+          restore-keys: uw-state-
+      - name: Install web-push
+        working-directory: .github/push
+        run: npm install --no-audit --no-fund --loglevel=error
+      - name: Watch the weather (one pass a minute)
+        continue-on-error: true
+        timeout-minutes: 58
+        run: node .github/push/send.mjs
+        env:
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          BOX_PRIVATE: ${{ secrets.BOX_PRIVATE }}
+          LOOP_MINUTES: '55'
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: uw-state-${{ github.run_id }}-${{ github.run_attempt }}-watch
+      - name: Start the next run
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh workflow run weather-push.yml -R "$GITHUB_REPOSITORY" --ref "${GITHUB_REF_NAME:-main}" && echo "next run requested" && exit 0
+            sleep $((i * 10))
+          done
+          echo "could not start the next run; the cron backstop will restart it"; exit 1
       - name: Tidy old state caches
         if: always()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh cache list -R "$GITHUB_REPOSITORY" --key uw-state- --sort created_at --order desc --limit 100 --json id --jq '.[3:][].id' \
+          gh cache list -R "$GITHUB_REPOSITORY" --key uw-state- --sort created_at --order desc --limit 100 --json id --jq '.[4:][].id' \
             | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY" || true
