@@ -6,6 +6,7 @@ import webpush from 'web-push';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 const env = process.env;
 const TOPIC = env.NTFY_TOPIC;
@@ -26,13 +27,15 @@ const b64u = s => Buffer.from(s, 'base64url');
 const boxPriv = b64u(env.BOX_PRIVATE);
 export function open(sealed) {
   const [v, eph, iv, ct] = String(sealed).trim().split('.');
-  if (v !== 'uw1' || !ct) throw new Error('not a uw1 message');
+  if ((v !== 'uw1' && v !== 'uw2') || !ct) throw new Error('not a uw1/uw2 message');
   const ecdh = crypto.createECDH('prime256v1'); ecdh.setPrivateKey(boxPriv);
   const shared = ecdh.computeSecret(b64u(eph));
   const key = Buffer.from(crypto.hkdfSync('sha256', shared, Buffer.alloc(0), Buffer.from('uw-box-v1'), 32));
   const data = b64u(ct), tag = data.subarray(data.length - 16);
   const d = crypto.createDecipheriv('aes-256-gcm', key, b64u(iv)); d.setAuthTag(tag);
-  return JSON.parse(Buffer.concat([d.update(data.subarray(0, data.length - 16)), d.final()]).toString('utf8'));
+  let plain = Buffer.concat([d.update(data.subarray(0, data.length - 16)), d.final()]);
+  if (v === 'uw2') plain = zlib.inflateRawSync(plain); // big settings (lots of custom alerts) arrive deflated
+  return JSON.parse(plain.toString('utf8'));
 }
 const stateKey = crypto.createHash('sha256').update(Buffer.concat([boxPriv, Buffer.from('uw-state-v1')])).digest();
 function loadState() {
@@ -96,11 +99,11 @@ async function push(state, sid, n, opts = {}) {
 async function checkWeather(state, sid) {
   const s = state.subs[sid], p = s.prefs || {}, F = s.unit !== 'C', deg = '°';
   const sent = s.sent || (s.sent = { alerts: {}, morning: null, temp: null, rainAt: 0, dryAt: 0 });
-  const u = `https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&timezone=auto&forecast_days=3`
-    + '&current=temperature_2m,apparent_temperature,weather_code,precipitation'
+  const u = `https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&timezone=auto&forecast_days=8`
+    + '&current=temperature_2m,apparent_temperature,weather_code,precipitation,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,cloud_cover,dew_point_2m'
     + '&minutely_15=precipitation,weather_code&past_minutely_15=1&forecast_minutely_15=6'
-    + '&hourly=precipitation_probability,temperature_2m,weather_code'
-    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_gusts_10m_max'
+    + '&hourly=precipitation_probability,temperature_2m,weather_code,apparent_temperature,wind_speed_10m,wind_gusts_10m,uv_index,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,snowfall'
+    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_gusts_10m_max,wind_speed_10m_max,uv_index_max,snowfall_sum'
     + (F ? '&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch' : '');
   let W;
   try { W = await getJSON(u); } catch (e) { log('open-meteo failed', e.message); return; }
@@ -113,7 +116,8 @@ async function checkWeather(state, sid) {
   log(`  weather read: ${Math.round(c.temperature_2m)}${deg}, ${WXT[c.weather_code] || c.weather_code}; prefs alerts=${p.alerts !== false} rain=${p.rain !== false} morning=${p.morning !== false} temp=${p.temp !== false} every=${p.every || 15}min`);
 
   // test request from the app
-  if (s.testPending || FORCE_TEST) {
+  const customTest = typeof s.testPending === 'string' ? s.testPending : null;
+  if ((s.testPending && !customTest) || FORCE_TEST) {
     await push(state, sid, { title: '✅ Push from the weather server works!', body: `Right now${place}: ${Math.round(c.temperature_2m)}${deg} and ${(WXT[c.weather_code] || '').toLowerCase()}. You're all set.`, tag: 'nexus-test', url: './#notify' }, { ttl: 900 });
     s.testPending = false;
   }
@@ -195,6 +199,213 @@ async function checkWeather(state, sid) {
     else if (tMaxToday - tMaxTom >= drop) n = { title: `📉 Big cool-down tomorrow: ${Math.round(tMaxTom)}${deg}`, body: `That's ${Math.round(tMaxToday - tMaxTom)}${deg} colder than today's high of ${Math.round(tMaxToday)}${deg}. Low ${Math.round(tMinTom)}${deg}. Plan a jacket.` };
     if (n) { await push(state, sid, { ...n, tag: 'nexus-temp', url: './' }, { ttl: 6 * 3600 }); sent.temp = today; }
   }
+
+  // the person's own alerts ("My alerts" in the app)
+  try { await customAlerts(state, sid, W, { today, mins, place, customTest }); }
+  catch (e) { log('  my alerts failed:', e.message); }
+  if (customTest) s.testPending = false;
+}
+
+
+/* ---------- 4) "My alerts": the person's own alerts from the app ---------- */
+// alert shape (compact, set in the app): { id, n: name, e: emoji, on, k: 'c' condition | 's' scheduled, u: unit it was written in ('F'|'C'), msg,
+//   condition: c: [{ m: metric, o: 'gt'|'lt'|'btw', v, v2 }], w: 'now'|'h3'|'h6'|'h12'|'today'|'tom', r: 'day'|'flip', h: ['07:00','22:00']
+//   scheduled: t: 'HH:MM', d: [0-6] (0 = Sunday), s: 'now'|'today'|'tonight'|'tom'|'3d'|'wknd'|'msg' }
+const MET = {
+  temp: { h: 'temperature_2m', c: 'temperature_2m', k: 't', lbl: 'Temp' },
+  feels: { h: 'apparent_temperature', c: 'apparent_temperature', k: 't', lbl: 'Feels like' },
+  wind: { h: 'wind_speed_10m', c: 'wind_speed_10m', k: 'w', lbl: 'Wind' },
+  gust: { h: 'wind_gusts_10m', c: 'wind_gusts_10m', k: 'w', lbl: 'Gusts' },
+  rain: { h: 'precipitation_probability', k: '%', lbl: 'Rain chance' },
+  precip: { h: 'precipitation', k: 'p', sum: true, lbl: 'Rain' },
+  snow: { h: 'snowfall', k: 's', sum: true, lbl: 'Snow' },
+  uv: { h: 'uv_index', k: 'uv', lbl: 'UV index' },
+  hum: { h: 'relative_humidity_2m', c: 'relative_humidity_2m', k: '%', lbl: 'Humidity' },
+  dew: { h: 'dew_point_2m', c: 'dew_point_2m', k: 't', lbl: 'Dew point' },
+  cloud: { h: 'cloud_cover', c: 'cloud_cover', k: '%', lbl: 'Clouds' },
+  aqi: { aq: true, k: 'aqi', lbl: 'Air quality (AQI)' }
+};
+// "below" on these means the whole window stays under the line (a dry, calm or clear stretch); on temperatures it means it drops below
+const STAYS = new Set(['rain', 'wind', 'gust', 'uv', 'aqi', 'cloud']);
+const WIN = { now: 'right now', h3: 'in the next 3 hours', h6: 'in the next 6 hours', h12: 'in the next 12 hours', today: 'later today', tom: 'tomorrow' };
+const unitTxt = (k, F) => k === 't' ? '°' : k === 'w' ? (F ? ' mph' : ' km/h') : k === 'p' ? (F ? ' in' : ' mm') : k === 's' ? (F ? ' in' : ' cm') : k === '%' ? '%' : '';
+const dispV = (k, v) => v == null || !isFinite(v) ? '?' : (k === 'p' || k === 's') ? (Math.round(v * 100) / 100).toString() : k === 'uv' ? (Math.round(v * 10) / 10).toString() : String(Math.round(v));
+const roundV = (k, v) => +dispV(k, v);
+function convert(k, v, from, to) { // the alert was written in one unit system, the phone may have switched since
+  if (v == null || from === to || !from) return +v;
+  const toF = to === 'F';
+  if (k === 't') return toF ? v * 9 / 5 + 32 : (v - 32) * 5 / 9;
+  if (k === 'w') return toF ? v / 1.609 : v * 1.609;
+  if (k === 'p') return toF ? v / 25.4 : v * 25.4;
+  if (k === 's') return toF ? v / 2.54 : v * 2.54;
+  return +v;
+}
+const toMin = t => { const [h, m] = String(t || '').split(':').map(Number); return isFinite(h) ? h * 60 + (m || 0) : null; };
+const sigOf = a => crypto.createHash('sha1').update(JSON.stringify([a.k, a.c, a.w, a.r, a.h, a.t, a.d, a.s, a.u])).digest('hex').slice(0, 10);
+const opTxt = (o, v, v2, k, F) => o === 'gt' ? `above ${dispV(k, v)}${unitTxt(k, F)}` : o === 'lt' ? `below ${dispV(k, v)}${unitTxt(k, F)}` : `${dispV(k, v)}–${dispV(k, v2)}${unitTxt(k, F)}`;
+
+function hourIdx(W, local) { const key = local.toISOString().slice(0, 13); const i = W.hourly.time.findIndex(t => t.slice(0, 13) === key); return i < 0 ? 0 : i; }
+function windowIdx(W, a, hi, today) {
+  const T = W.hourly.time, n = T.length;
+  const span = { h3: 3, h6: 6, h12: 12 }[a.w];
+  if (span) return Array.from({ length: span }, (_, j) => hi + j).filter(k => k < n);
+  if (a.w === 'today') return T.map((t, k) => k).filter(k => k >= hi && T[k].startsWith(today));
+  if (a.w === 'tom') { const tom = new Date(Date.parse(today + 'T12:00:00Z') + 864e5).toISOString().slice(0, 10); return T.map((t, k) => k).filter(k => T[k].startsWith(tom)); }
+  return [hi];
+}
+// evaluate one condition alert → { hit, parts: [{ c, val, at, ok }] }
+function evalCondition(a, W, AQ, ctx) {
+  const F = ctx.F, local = new Date(NOW + (W.utc_offset_seconds * 1000)), hi = hourIdx(W, local);
+  const idx = windowIdx(W, a, hi, ctx.today);
+  const parts = [];
+  for (const c of (a.c || []).slice(0, 3)) {
+    const M = MET[c.m]; if (!M) continue;
+    let series, cur = null;
+    if (M.aq) {
+      if (!AQ) { parts.push({ c, M, val: null, ok: false, at: null }); continue; }
+      const map = new Map(AQ.hourly.time.map((t, k) => [t, AQ.hourly.us_aqi[k]]));
+      series = idx.map(k => [k, map.get(W.hourly.time[k])]).filter(([, v]) => v != null);
+      if (a.w === 'now' && AQ.current && AQ.current.us_aqi != null) cur = AQ.current.us_aqi;
+    } else {
+      series = idx.map(k => [k, W.hourly[M.h] ? W.hourly[M.h][k] : null]).filter(([, v]) => v != null);
+      if (a.w === 'now' && M.c && W.current[M.c] != null) cur = W.current[M.c];
+    }
+    let val = null, at = null;
+    if (cur != null) val = cur;
+    else if (series.length) {
+      if (M.sum) { val = series.reduce((x, [, v]) => x + v, 0); at = series.find(([, v]) => v > 0)?.[0] ?? null; }
+      else { const low = c.o === 'lt' && !STAYS.has(c.m); const pick = low ? series.reduce((x, y) => (y[1] < x[1] ? y : x)) : series.reduce((x, y) => (y[1] > x[1] ? y : x)); val = pick[1]; at = pick[0]; }
+    }
+    const v = convert(M.k, +c.v, a.u, F ? 'F' : 'C'), v2 = convert(M.k, +c.v2, a.u, F ? 'F' : 'C'), r = val == null ? null : roundV(M.k, val);
+    const ok = r != null && (c.o === 'gt' ? r > roundV(M.k, v) : c.o === 'lt' ? r < roundV(M.k, v) : (r >= roundV(M.k, Math.min(v, v2)) && r <= roundV(M.k, Math.max(v, v2))));
+    parts.push({ c, M, val, at, ok, v, v2 });
+  }
+  return { hit: parts.length > 0 && parts.every(x => x.ok), parts };
+}
+function phrase(a, x, F, W) {
+  if (x.val == null) return `${x.M.lbl}: not available here`;
+  const d = dispV(x.M.k, x.val) + unitTxt(x.M.k, F);
+  const when = x.at != null && a.w !== 'now' ? ` around ${hhmm(W.hourly.time[x.at])}` : '';
+  const tail = a.w === 'tom' ? ' tomorrow' : '';
+  if (a.w === 'now') return x.c.m === 'temp' ? `It's ${d} right now` : `${x.M.lbl} ${d} right now`;
+  if (x.M.sum) return `${x.M.lbl}: ${d} total ${WIN[a.w]}`;
+  if (x.c.o === 'lt' && STAYS.has(x.c.m)) return `${x.M.lbl} ${d} at most ${WIN[a.w]}`;
+  const word = x.c.o === 'lt' ? 'down to' : x.c.o === 'btw' ? 'peaking at' : 'up to';
+  return `${x.M.lbl} ${word} ${d}${when}${tail}`;
+}
+function dayLine(W, k, F) {
+  const D = W.daily; if (k < 0 || k >= D.time.length) return '';
+  let code = D.weather_code[k];
+  if (code >= 51 && (D.precipitation_probability_max[k] ?? 0) < 30) { // a stray drizzle code on a mostly dry day: use the most common daytime sky
+    const H = W.hourly, cnt = {}; H.time.forEach((t, j) => { if (t.startsWith(D.time[k]) && +t.slice(11, 13) >= 7 && +t.slice(11, 13) <= 20) cnt[H.weather_code[j]] = (cnt[H.weather_code[j]] || 0) + 1; });
+    const top = Object.keys(cnt).sort((x, y) => cnt[y] - cnt[x])[0]; if (top != null) code = +top;
+  }
+  const g = D.wind_gusts_10m_max[k], sn = D.snowfall_sum ? D.snowfall_sum[k] : 0;
+  return `${EMO(code)} ${WXT[code] || ''}, high ${Math.round(D.temperature_2m_max[k])}° · low ${Math.round(D.temperature_2m_min[k])}°. Rain ${D.precipitation_probability_max[k] ?? 0}%`
+    + (g >= (F ? 25 : 40) ? ` · gusts ${Math.round(g)}${unitTxt('w', F)}` : '') + (sn > 0 ? ` · snow ${dispV('s', sn)}${unitTxt('s', F)}` : '');
+}
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dowOf = iso => new Date(iso + 'T12:00:00Z').getUTCDay();
+function scheduledBody(a, W, ctx) {
+  const F = ctx.F, D = W.daily, H = W.hourly, c = W.current, ti = Math.max(0, D.time.indexOf(ctx.today));
+  const local = new Date(NOW + W.utc_offset_seconds * 1000), hi = hourIdx(W, local);
+  const peakRain = ks => { const w = ks.filter(k => H.precipitation_probability[k] != null); if (!w.length) return ''; const pk = w.reduce((x, y) => (H.precipitation_probability[y] > H.precipitation_probability[x] ? y : x)); const pp = H.precipitation_probability[pk]; return pp >= 20 ? `Rain chance up to ${pp}% around ${hhmm(H.time[pk])}.` : 'No rain expected.'; };
+  const mode = ks => { const cnt = {}; for (const k of ks) cnt[H.weather_code[k]] = (cnt[H.weather_code[k]] || 0) + 1; return +Object.keys(cnt).sort((x, y) => cnt[y] - cnt[x])[0]; };
+  switch (a.s) {
+    case 'msg': return '';
+    case 'now': {
+      const pp = H.precipitation_probability[hi] ?? 0;
+      return `Now: ${Math.round(c.temperature_2m)}° (feels ${Math.round(c.apparent_temperature)}°), ${(WXT[c.weather_code] || '').toLowerCase()}. Wind ${Math.round(c.wind_speed_10m)}${unitTxt('w', F)}${c.wind_gusts_10m > c.wind_speed_10m + 5 ? `, gusts ${Math.round(c.wind_gusts_10m)}` : ''}. Rain chance ${pp}% this hour.`;
+    }
+    case 'today': {
+      const ks = H.time.map((t, k) => k).filter(k => k >= hi && H.time[k].startsWith(ctx.today));
+      if (!ks.length) return dayLine(W, ti + 1, F) ? 'Tomorrow: ' + dayLine(W, ti + 1, F) : '';
+      const temps = ks.map(k => H.temperature_2m[k]);
+      return `Rest of today: ${EMO(mode(ks))} ${(WXT[mode(ks)] || '').toLowerCase()}, ${Math.round(Math.max(...temps))}° to ${Math.round(Math.min(...temps))}°. ${peakRain(ks)}`;
+    }
+    case 'tonight': {
+      const start = Math.max(hi, H.time.findIndex(t => t.startsWith(ctx.today) && +t.slice(11, 13) === 18));
+      const ks = []; for (let k = start; k < H.time.length && ks.length < 14; k++) { ks.push(k); if (+H.time[k].slice(11, 13) === 7 && k > start) break; }
+      const lo = Math.min(...ks.map(k => H.temperature_2m[k]));
+      return `Tonight: ${EMO(mode(ks))} ${(WXT[mode(ks)] || '').toLowerCase()}, low ${Math.round(lo)}°. ${peakRain(ks)}\nTomorrow: ${dayLine(W, ti + 1, F)}`;
+    }
+    case 'tom': return `Tomorrow (${DOW[dowOf(D.time[ti + 1])]}): ${dayLine(W, ti + 1, F)}`;
+    case '3d': return [1, 2, 3].filter(j => D.time[ti + j]).map(j => `${DOW[dowOf(D.time[ti + j])]} ${EMO(D.weather_code[ti + j])} ${Math.round(D.temperature_2m_max[ti + j])}°/${Math.round(D.temperature_2m_min[ti + j])}° · rain ${D.precipitation_probability_max[ti + j] ?? 0}%`).join('\n');
+    case 'wknd': {
+      const t0 = dowOf(D.time[ti]);
+      let ks = t0 === 6 ? [ti, ti + 1] : t0 === 0 ? [ti] : (() => { const k = D.time.findIndex((t, j) => j > ti && dowOf(t) === 6); return k < 0 ? [] : [k, k + 1]; })();
+      ks = ks.filter(k => k < D.time.length);
+      return ks.length ? ks.map(k => `${DOW[dowOf(D.time[k])]}${k === ti ? ' (today)' : ''} ${EMO(D.weather_code[k])} ${WXT[D.weather_code[k]] || ''}, ${Math.round(D.temperature_2m_max[k])}°/${Math.round(D.temperature_2m_min[k])}° · rain ${D.precipitation_probability_max[k] ?? 0}%`).join('\n') : dayLine(W, ti + 1, F);
+    }
+    default: return dayLine(W, ti, F);
+  }
+}
+const cleanAlerts = p => (Array.isArray(p.custom) ? p.custom : []).filter(a => a && typeof a.id === 'string' && (a.k === 'c' || a.k === 's')).slice(0, 25);
+function customScheduledDue(s) {
+  if (s.off == null) return false;
+  const [today, mins] = minsLocal(s), dow = new Date(NOW + s.off).getUTCDay(), st = ((s.sent || {}).custom) || {};
+  return cleanAlerts(s.prefs || {}).some(a => a.k === 's' && a.on !== false && (a.d || []).includes(dow) && (() => { const t = toMin(a.t); return t != null && mins >= t && mins <= t + 90 && (st[a.id] || {}).d !== today; })());
+}
+async function customAlerts(state, sid, W, ctx) {
+  const s = state.subs[sid], F = s.unit !== 'C', list = cleanAlerts(s.prefs || {});
+  const sent = s.sent; sent.custom ||= {};
+  for (const k of Object.keys(sent.custom)) if (!list.some(a => a.id === k)) delete sent.custom[k];
+  if (!list.length && !ctx.customTest) { log('  my alerts: none set'); return; }
+  log(`  my alerts: ${list.length} set, ${list.filter(a => a.on !== false).length} on`);
+  const local = new Date(NOW + W.utc_offset_seconds * 1000), dow = local.getUTCDay();
+  const needAQ = list.some(a => a.k === 'c' && (a.on !== false || a.id === ctx.customTest) && (a.c || []).some(c => c.m === 'aqi'));
+  let AQ = null;
+  if (needAQ) { try { AQ = await getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${s.lat}&longitude=${s.lon}&current=us_aqi&hourly=us_aqi&timezone=auto&forecast_days=3`); } catch (e) { log('  air quality read failed', e.message); } }
+  const fx = { F, today: ctx.today };
+  const nm = a => `${String(a.e || '🔔').slice(0, 8)} ${String(a.n || 'My alert').slice(0, 40)}`.trim();
+  const tagOf = a => 'nx-c-' + a.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 20);
+  const msgOf = a => String(a.msg || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  let i = 0;
+  for (const a of list) {
+    i++;
+    const isTest = a.id === ctx.customTest;
+    if (a.on === false && !isTest) continue;
+    const st = sent.custom[a.id] && sent.custom[a.id].sig === sigOf(a) ? sent.custom[a.id] : (sent.custom[a.id] = { sig: sigOf(a) });
+    if (a.k === 'c') {
+      const res = evalCondition(a, W, AQ, fx);
+      const desc = (a.c || []).map(c => `${c.m} ${c.o} ${c.v}${c.o === 'btw' ? '-' + c.v2 : ''}`).join(' & ');
+      const vals = res.parts.map(x => x.val == null ? 'n/a' : dispV(x.M.k, x.val)).join(', ');
+      const [h1, h2] = (Array.isArray(a.h) ? a.h : ['07:00', '22:00']).map(toMin);
+      let inHours = h1 == null || h2 == null || h1 === h2 ? true : h1 < h2 ? (ctx.mins >= h1 && ctx.mins < h2) : (ctx.mins >= h1 || ctx.mins < h2);
+      if (a.w === 'tom' && ctx.mins < 17 * 60) inHours = false; // "tomorrow" alerts are an evening heads-up
+      const body = res.parts.map(x => phrase(a, x, F, W)).join('. ');
+      if (isTest) {
+        const why = res.parts.filter(x => !x.ok).map(x => `${phrase(a, x, F, W)} (alert is for ${opTxt(x.c.o, x.v, x.v2, x.M.k, F)})`).join('. ');
+        await push(state, sid, { title: `🧪 Test · ${nm(a)}`, body: res.hit ? [msgOf(a), body + '. (True right now, so this one would send.)'].filter(Boolean).join('\n') : `Not happening right now. ${why}. You'll get it when it is.`, tag: tagOf(a), url: './#notify' }, { ttl: 900 });
+        log(`  my alert #${i} TEST [${desc} ${a.w}] values ${vals} → ${res.hit ? 'true' : 'false'}, test sent`);
+        continue;
+      }
+      let fire = false, why = '';
+      if (!inHours) why = a.w === 'tom' ? 'waits for the evening' : 'outside its active hours';
+      else if (a.r === 'flip') { fire = res.hit && !st.was && NOW - (st.at || 0) > 3600e3; why = res.hit ? (st.was ? 'still true, already sent' : fire ? 'just became true' : 'sent within the hour') : 'false (re-armed)'; st.was = res.hit; }
+      else { fire = res.hit && st.d !== ctx.today; why = res.hit ? (fire ? 'true' : 'already sent today') : 'false'; }
+      log(`  my alert #${i} [${desc} ${a.w}${a.r === 'flip' ? ', every time' : ', once a day'}] values ${vals} → ${why}${fire ? ' → SEND' : ''}`);
+      if (fire) {
+        const ok = await push(state, sid, { title: nm(a), body: [msgOf(a), body + '.'].filter(Boolean).join('\n'), tag: tagOf(a), url: './' }, { ttl: 2 * 3600, urgency: 'high' });
+        if (ok) { st.d = ctx.today; st.at = NOW; }
+      }
+    } else {
+      const t = toMin(a.t), days = Array.isArray(a.d) ? a.d : [];
+      const due = t != null && days.includes(dow) && ctx.mins >= t && ctx.mins <= t + 90 && st.d !== ctx.today;
+      if (!isTest) log(`  my alert #${i} [timed ${a.t} on ${days.map(d => DOW[d]).join(',') || 'no days'}, ${a.s}] → ${due ? 'SEND' : st.d === ctx.today ? 'already sent today' : 'not now'}`);
+      if (!due && !isTest) continue;
+      const late = !isTest && ctx.mins - t > 20;
+      const content = scheduledBody(a, W, fx), m = msgOf(a);
+      const body = [m, content].filter(Boolean).join('\n') || 'Your timed alert.';
+      const ok = await push(state, sid, { title: `${isTest ? '🧪 Test · ' : ''}${nm(a)}${late ? ' (a bit late)' : ''}`, body, tag: tagOf(a), url: './' }, { ttl: isTest ? 900 : 2 * 3600 });
+      if (isTest) log(`  my alert #${i} TEST [timed ${a.s}] sent`);
+      else if (ok) { st.d = ctx.today; st.at = NOW; }
+    }
+  }
+  if (ctx.customTest && !list.some(a => a.id === ctx.customTest)) {
+    log('  test asked for an alert that is not in the saved list');
+    await push(state, sid, { title: '🧪 Test', body: 'That alert hasn\'t synced yet. Open the app, then tap Test again.', tag: 'nexus-test', url: './#notify' }, { ttl: 900 });
+  }
 }
 
 /* ---------- main ---------- */
@@ -214,7 +425,7 @@ async function cycle(verbose) {
     if (!/^https:\/\//.test(m.sub.endpoint)) continue;
     const sid = idOf(m.sub.endpoint), prev = state.subs[sid] || {};
     state.subs[sid] = { ...prev, sub: m.sub, lat: Math.round(+m.lat * 100) / 100, lon: Math.round(+m.lon * 100) / 100, name: String(m.name || '').slice(0, 40), unit: m.unit === 'C' ? 'C' : 'F', prefs: m.prefs || {}, at: m._at };
-    if (m.type === 'test') state.subs[sid].testPending = true;
+    if (m.type === 'test') state.subs[sid].testPending = (typeof m.testAlert === 'string' && m.testAlert) ? m.testAlert.slice(0, 24) : true;
     log(`${prev.sub ? 'updated' : 'new'} subscriber ${sid} (${m.type})`);
   }
   // keep the 5 most recent devices
@@ -225,9 +436,9 @@ async function cycle(verbose) {
     // honour the "Check every" choice from the app (5-60 min); the morning summary and tests don't wait for it
     const s = state.subs[sid], every = Math.min(60, Math.max(5, +(s.prefs && s.prefs.every) || 15));
     const due = !s.lastCheck || NOW - s.lastCheck >= every * 60000 - 30000;
-    const md = morningDue(s);
-    if (!due && !md && !s.testPending && !FORCE_TEST) { if (verbose) log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
-    log(`checking ${sid} (every ${every} min${md ? ', morning summary due' : ''}${s.testPending || FORCE_TEST ? ', test requested' : ''})`);
+    const md = morningDue(s), cd = !due && customScheduledDue(s); // timed "My alerts" don't wait for "Check every" either
+    if (!due && !md && !cd && !s.testPending && !FORCE_TEST) { if (verbose) log(`skip ${sid}: checks every ${every} min, last ${Math.round((NOW - s.lastCheck) / 60000)} min ago`); continue; }
+    log(`checking ${sid} (every ${every} min${md ? ', morning summary due' : ''}${cd ? ', timed alert due' : ''}${s.testPending || FORCE_TEST ? ', test requested' : ''})`);
     s.lastCheck = NOW;
     try { await checkWeather(state, sid); } catch (e) { log('check failed for', sid, e.message); }
   }

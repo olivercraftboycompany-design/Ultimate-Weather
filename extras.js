@@ -216,7 +216,7 @@ const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in win
 function payload(sub) {
   const loc = P.loc || S().loc;
   return { v: 1, sub, lat: Math.round(loc.lat * 100) / 100, lon: Math.round(loc.lon * 100) / 100, name: (loc.name || '').split(',')[0].slice(0, 40),
-    unit: S().unit, prefs: { alerts: P.alerts, rain: P.rain, morning: P.morning, morningTime: P.morningTime, temp: P.temp, every: P.every || 15 },
+    unit: S().unit, prefs: { alerts: P.alerts, rain: P.rain, morning: P.morning, morningTime: P.morningTime, temp: P.temp, every: P.every || 15, custom: (Array.isArray(P.custom) ? P.custom : []).map(({ preset, ...a }) => a) },
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone };
 }
 async function saveConfig(sub) {
@@ -257,7 +257,7 @@ async function testPush() {
     const reg = await navigator.serviceWorker.ready;
     await reg.showNotification('🔔 NEXUS test', { body: 'Notifications work on this phone! A real one from the weather server is on its way too.', icon: 'icons/icon-192.png', badge: 'icons/badge-96.png', tag: 'nexus-test', data: { url: './#notify' } });
     await publish('test');
-    status('Sent ✅ You should see one now. A real push from the server lands within ~15–30 min (GitHub runs it on a timer).', 'ok');
+    status('Sent ✅ You should see one now. A real push from the weather server lands in about a minute.', 'ok');
   } catch (e) { status('Test failed: ' + (e.message || e), 'warn'); }
 }
 let prefT;
@@ -292,9 +292,220 @@ async function refreshPush() {
   } catch (e) { console.warn('push refresh', e); }
 }
 
+
+/* ---------- My alerts: custom notifications he builds himself ---------- */
+const MA_MET = [ // key, label, kind, default F, default C, step
+  ['temp', 'Temperature', 't', 50, 10, 1], ['feels', 'Feels like', 't', 50, 10, 1], ['wind', 'Wind speed', 'w', 20, 30, 1], ['gust', 'Wind gusts', 'w', 25, 40, 1],
+  ['rain', 'Rain chance', '%', 50, 50, 5], ['precip', 'Rain amount', 'p', 0.25, 6, 0.05], ['snow', 'Snowfall', 's', 1, 2, 0.1], ['uv', 'UV index', 'uv', 7, 7, 1],
+  ['aqi', 'Air quality (AQI)', 'aqi', 100, 100, 5], ['hum', 'Humidity', '%', 80, 80, 5], ['dew', 'Dew point', 't', 65, 18, 1], ['cloud', 'Cloud cover', '%', 20, 20, 5]
+];
+const MA_M = Object.fromEntries(MA_MET.map(m => [m[0], m]));
+const MA_WIN = [['now', 'Right now'], ['h3', 'In the next 3 hours'], ['h6', 'In the next 6 hours'], ['h12', 'In the next 12 hours'], ['today', 'Later today'], ['tom', 'Tomorrow (heads-up after 5 PM)']];
+const MA_WIN_SHORT = { now: 'now', h3: 'next 3h', h6: 'next 6h', h12: 'next 12h', today: 'today', tom: 'tomorrow' };
+const MA_SEND = [['tonight', 'Tonight + tomorrow'], ['tom', "Tomorrow's forecast"], ['now', 'Current conditions'], ['today', 'Rest of today'], ['3d', 'Next 3 days'], ['wknd', 'Weekend outlook'], ['msg', 'Just my message']];
+const MA_DAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'], MA_DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MA_EMO = ['🔔', '🧥', '😎', '💨', '😷', '🌙', '☔', '❄️', '🥵', '⚡', '🏈', '🚲'];
+const maU = (k, u) => k === 't' ? '°' + (u === 'C' ? 'C' : 'F') : k === 'w' ? (u === 'C' ? ' km/h' : ' mph') : k === 'p' ? (u === 'C' ? ' mm' : ' in') : k === 's' ? (u === 'C' ? ' cm' : ' in') : k === '%' ? '%' : '';
+const maId = () => Math.random().toString(36).slice(2, 9);
+const isF = () => S().unit !== 'C';
+const MA_PRESETS = [
+  { key: 'hoodie', label: '🧥 Hoodie weather (<50°)', make: () => ({ n: 'Hoodie weather', e: '🧥', k: 'c', c: [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }], w: 'now', r: 'day', h: ['07:00', '22:00'] }) },
+  { key: 'nice', label: '😎 Nice day (65–80° & dry)', make: () => ({ n: 'Nice day', e: '😎', k: 'c', c: [{ m: 'temp', o: 'btw', v: isF() ? 65 : 18, v2: isF() ? 80 : 27 }, { m: 'rain', o: 'lt', v: 20 }], w: 'today', r: 'day', h: ['07:00', '22:00'] }) },
+  { key: 'windy', label: '💨 Windy (gusts >25 mph)', make: () => ({ n: 'Windy', e: '💨', k: 'c', c: [{ m: 'gust', o: 'gt', v: isF() ? 25 : 40 }], w: 'h3', r: 'flip', h: ['07:00', '22:00'] }) },
+  { key: 'air', label: '😷 Bad air (AQI >100)', make: () => ({ n: 'Bad air', e: '😷', k: 'c', c: [{ m: 'aqi', o: 'gt', v: 100 }], w: 'now', r: 'day', h: ['07:00', '22:00'] }) },
+  { key: 'tonight', label: "🌙 Tonight's forecast 9 PM", make: () => ({ n: "Tonight's forecast", e: '🌙', k: 's', t: '21:00', d: [0, 1, 2, 3, 4, 5, 6], s: 'tonight' }) },
+  { key: 'tomorrow', label: "📅 Tomorrow's forecast 8 PM", make: () => ({ n: "Tomorrow's forecast", e: '📅', k: 's', t: '20:00', d: [0, 1, 2, 3, 4, 5, 6], s: 'tom' }) },
+  { key: 'weekend', label: '🏈 Weekend outlook Fri 5 PM', make: () => ({ n: 'Weekend outlook', e: '🏈', k: 's', t: '17:00', d: [5], s: 'wknd' }) },
+  { key: 'snow', label: '❄️ Snow tomorrow', make: () => ({ n: 'Snow tomorrow', e: '❄️', k: 'c', c: [{ m: 'snow', o: 'gt', v: isF() ? 0.5 : 1 }], w: 'tom', r: 'day', h: ['07:00', '22:00'] }) }
+];
+const t12 = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''} ${h >= 12 ? 'PM' : 'AM'}`; };
+const daysTxt = d => { const s = [...(d || [])].sort().join(''); return s === '0123456' ? 'Every day' : s === '12345' ? 'Weekdays' : s === '06' ? 'Weekends' : !s ? 'No days picked' : (d || []).slice().sort().map(i => MA_DAYN[i]).join(', '); };
+const MA_SHORT = { temp: 'Temp', feels: 'Feels', wind: 'Wind', gust: 'Gusts', rain: 'Rain', precip: 'Rain amt', snow: 'Snow', uv: 'UV', aqi: 'AQI', hum: 'Humidity', dew: 'Dew pt', cloud: 'Clouds' };
+function condTxt(c, u, short) {
+  const m = MA_M[c.m]; if (!m) return '?';
+  const un = short && m[2] === 't' ? '°' : maU(m[2], u);
+  return `${short ? MA_SHORT[c.m] : m[1]} ${c.o === 'gt' ? '>' : c.o === 'lt' ? '<' : ''}${c.o === 'btw' ? `${c.v}–${c.v2}` : c.v}${un}`;
+}
+function maSummary(a) {
+  if (a.k === 's') return `${t12(a.t)} · ${daysTxt(a.d)} · ${(MA_SEND.find(x => x[0] === a.s) || [, ''])[1]}`;
+  return `${(a.c || []).map(c => condTxt(c, a.u, true)).join(' & ')} · ${MA_WIN_SHORT[a.w] || ''} · ${a.r === 'flip' ? 'every time' : 'once a day'}`;
+}
+let maList = Array.isArray(P.custom) ? P.custom : [];
+let maT;
+function maStatus(msg, kind) { const el = $('#maStatus'); if (!el) return; el.textContent = msg; el.className = 'text-xs mt-2 ' + (kind === 'ok' ? 'text-emerald-400' : kind === 'warn' ? 'text-amber-400' : 'text-zinc-400'); }
+const pushIsOn = () => P.on && pushSupported() && Notification.permission === 'granted';
+function maSave(quiet) {
+  P.custom = maList; lsSet('push', P); saveConfig(); renderAlerts();
+  clearTimeout(maT);
+  if (!pushIsOn()) { if (!quiet) maStatus('Saved on this phone. Turn on notifications above to start getting them.', 'warn'); return Promise.resolve(false); }
+  return new Promise(res => { maT = setTimeout(() => publish('sub').then(() => { if (!quiet) maStatus('Saved and synced ✅', 'ok'); res(true); }).catch(e => { maStatus('Saved on this phone. Couldn\'t sync yet (' + (e.message || e) + '), will retry when you reopen the app.', 'warn'); P.lastPost = 0; lsSet('push', P); res(false); }), 500); });
+}
+async function maTest(id) {
+  const a = maList.find(x => x.id === id); if (!a) return;
+  if (!pushIsOn()) { maStatus('Turn on notifications above first, then tap Test.', 'warn'); return; }
+  maStatus('Sending test…');
+  try { clearTimeout(maT); await publish('test', { testAlert: id }); maStatus(`Test sent 🧪 "${a.n}" pops up in about a minute${a.k === 'c' ? ', and it says whether it would go off right now' : ''}.`, 'ok'); }
+  catch (e) { maStatus('Test failed: ' + (e.message || e), 'warn'); }
+}
+function renderAlerts() {
+  const box = $('#maList'); if (!box) return;
+  const have = new Set(maList.map(a => a.preset).filter(Boolean));
+  $('#maPresets').innerHTML = MA_PRESETS.map(p => `<button class="chip-btn ma-preset${have.has(p.key) ? ' added' : ''}" data-p="${p.key}" ${have.has(p.key) ? 'aria-disabled="true"' : ''}>${have.has(p.key) ? '<i class="ph-bold ph-check text-emerald-400"></i>' : '<i class="ph-bold ph-plus"></i>'} ${esc(p.label)}</button>`).join('');
+  box.innerHTML = maList.length ? maList.map(a => `<div class="ma-row${a.on === false ? ' off' : ''}" data-id="${esc(a.id)}">
+      <button class="ma-main" data-edit="${esc(a.id)}" aria-label="Edit ${esc(a.n)}"><span class="ma-emo">${esc(a.e || '🔔')}</span><span class="min-w-0 flex-1 text-left"><span class="block text-sm font-semibold text-zinc-200 truncate">${esc(a.n || 'My alert')}</span><span class="block text-xs text-zinc-500 truncate">${esc(maSummary(a))}</span></span></button>
+      <button class="ma-ico" data-test="${esc(a.id)}" aria-label="Test ${esc(a.n)}" title="Test this alert"><i class="ph ph-paper-plane-tilt"></i></button>
+      <input type="checkbox" class="nsw" data-tog="${esc(a.id)}" ${a.on !== false ? 'checked' : ''} aria-label="${esc(a.n)} on/off">
+    </div>`).join('') : `<p class="text-xs text-zinc-500 ma-empty">No alerts yet. Tap a preset above or <b class="text-zinc-300">New alert</b>.</p>`;
+  $('#maCount').textContent = maList.length ? `${maList.filter(a => a.on !== false).length}/${maList.length} on` : '';
+}
+function addPreset(key) {
+  const p = MA_PRESETS.find(x => x.key === key); if (!p) return;
+  if (maList.some(a => a.preset === key)) { const a = maList.find(x => x.preset === key); openEditor(a.id); return; }
+  if (maList.length >= 20) { maStatus('That\'s 20 alerts, the max. Delete one first.', 'warn'); return; }
+  const a = { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', preset: key, msg: '', ...p.make() };
+  maList.push(a); maSave(true).then(ok => maStatus(ok ? `Added "${a.n}" ✅ Tap it to tweak, or ✈ to test.` : `Added "${a.n}". Turn on notifications above to get it.`, ok ? 'ok' : 'warn'));
+}
+/* editor sheet */
+let draft = null;
+function openEditor(id) {
+  const a = id ? maList.find(x => x.id === id) : null;
+  draft = a ? JSON.parse(JSON.stringify(a)) : { id: maId(), on: true, u: S().unit === 'C' ? 'C' : 'F', n: '', e: '🔔', k: 'c', c: [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }], w: 'now', r: 'day', h: ['07:00', '22:00'], t: '21:00', d: [0, 1, 2, 3, 4, 5, 6], s: 'tonight', msg: '' };
+  draft._new = !a;
+  draft.c ||= [{ m: 'temp', o: 'lt', v: isF() ? 50 : 10 }]; draft.w ||= 'now'; draft.r ||= 'day'; draft.h ||= ['07:00', '22:00'];
+  draft.t ||= '21:00'; draft.d ||= [0, 1, 2, 3, 4, 5, 6]; draft.s ||= 'tonight';
+  renderEditor();
+  const sh = $('#maSheet'); sh.classList.remove('hidden'); sh.classList.add('flex'); document.body.style.overflow = 'hidden';
+  setTimeout(() => { const n = $('#maName'); if (n && draft._new) n.focus({ preventScroll: true }); }, 50);
+}
+function closeEditor() { const sh = $('#maSheet'); sh.classList.add('hidden'); sh.classList.remove('flex'); document.body.style.overflow = ''; draft = null; }
+function readEditor() {
+  if (!draft) return;
+  draft.n = ($('#maName').value || '').trim().slice(0, 40); draft.e = ($('#maEmoji').value || '').trim().slice(0, 8) || '🔔';
+  draft.msg = ($('#maMsg').value || '').trim().slice(0, 160);
+  if (draft.k === 'c') {
+    draft.c = [...document.querySelectorAll('.ma-cond')].map(r => {
+      const c = { m: r.querySelector('.ma-m').value, o: r.querySelector('.ma-o').value, v: parseFloat(r.querySelector('.ma-v').value) };
+      if (c.o === 'btw') c.v2 = parseFloat(r.querySelector('.ma-v2').value);
+      return c;
+    });
+    draft.w = $('#maWin').value; draft.r = $('#maRe').value; draft.h = [$('#maH1').value || '07:00', $('#maH2').value || '22:00'];
+  } else { draft.t = $('#maTime').value || '21:00'; draft.s = $('#maSend').value; }
+}
+function condRow(c, i, n) {
+  const m = MA_M[c.m] || MA_MET[0];
+  const opts = MA_MET.map(x => `<option value="${x[0]}" ${x[0] === c.m ? 'selected' : ''}>${x[1]}</option>`).join('');
+  const un = esc(maU(m[2], draft.u));
+  return `<div class="ma-cond" data-i="${i}">
+    <div class="flex gap-2"><select class="ma-in ma-m flex-1" aria-label="What to watch">${opts}</select>
+    <select class="ma-in ma-o" aria-label="Above or below"><option value="gt" ${c.o === 'gt' ? 'selected' : ''}>above</option><option value="lt" ${c.o === 'lt' ? 'selected' : ''}>below</option><option value="btw" ${c.o === 'btw' ? 'selected' : ''}>between</option></select></div>
+    <div class="flex gap-2 items-center mt-2"><input class="ma-in ma-v w-24" type="number" inputmode="decimal" step="${m[5]}" value="${esc(c.v ?? '')}" aria-label="Value">
+    ${c.o === 'btw' ? `<span class="text-zinc-500 text-sm">and</span><input class="ma-in ma-v2 w-24" type="number" inputmode="decimal" step="${m[5]}" value="${esc(c.v2 ?? '')}" aria-label="Second value">` : ''}
+    <span class="text-sm text-zinc-400">${un}</span><span class="flex-1"></span>
+    ${n > 1 ? `<button class="ma-ico ma-rm" data-rm="${i}" aria-label="Remove this condition"><i class="ph ph-x"></i></button>` : ''}</div>
+  </div>`;
+}
+function renderEditor() {
+  const d = draft, cond = d.k === 'c';
+  $('#maTitle').textContent = d._new ? 'New alert' : 'Edit alert';
+  $('#maBody').innerHTML = `
+    <div class="flex gap-2"><input id="maEmoji" class="ma-in w-14 text-center text-lg" value="${esc(d.e)}" maxlength="8" aria-label="Emoji">
+      <input id="maName" class="ma-in flex-1" value="${esc(d.n)}" maxlength="40" placeholder="Name it (e.g. Hoodie weather)" aria-label="Alert name"></div>
+    <div class="flex gap-1.5 mt-2 overflow-x-auto ma-scroll">${MA_EMO.map(x => `<button class="ma-emopick" data-emo="${x}" aria-label="Use ${x}">${x}</button>`).join('')}</div>
+    <div class="seg mt-4" role="tablist"><button class="flex-1 !py-2 ${cond ? 'on' : ''}" data-kind="c"><i class="ph-bold ph-thermometer-simple"></i> When the weather…</button><button class="flex-1 !py-2 ${!cond ? 'on' : ''}" data-kind="s"><i class="ph-bold ph-alarm"></i> At a set time</button></div>
+    ${cond ? `
+      <p class="ma-lbl">Send it when</p>
+      <div class="flex flex-col gap-2" id="maConds">${d.c.map((c, i) => condRow(c, i, d.c.length)).join('<p class="text-[11px] font-bold text-zinc-500 text-center tracking-widest">AND</p>')}</div>
+      ${d.c.length < 3 ? `<button id="maAddC" class="text-blue-400 text-xs font-semibold mt-2"><i class="ph-bold ph-plus"></i> Add another condition</button>` : ''}
+      <p class="ma-lbl">When</p>
+      <select id="maWin" class="ma-in w-full">${MA_WIN.map(w => `<option value="${w[0]}" ${w[0] === d.w ? 'selected' : ''}>${w[1]}</option>`).join('')}</select>
+      <p class="ma-lbl">How often</p>
+      <select id="maRe" class="ma-in w-full"><option value="day" ${d.r !== 'flip' ? 'selected' : ''}>Once a day max</option><option value="flip" ${d.r === 'flip' ? 'selected' : ''}>Every time it starts (max once an hour)</option></select>
+      <p class="ma-lbl">Only between</p>
+      <div class="flex items-center gap-2"><input id="maH1" type="time" class="ma-in flex-1" value="${esc(d.h[0])}" aria-label="From"><span class="text-zinc-500 text-sm">and</span><input id="maH2" type="time" class="ma-in flex-1" value="${esc(d.h[1])}" aria-label="To"></div>
+      <p class="text-[11px] text-zinc-500 mt-1">So it doesn't buzz you at 3 AM.</p>
+    ` : `
+      <p class="ma-lbl">Time</p>
+      <input id="maTime" type="time" class="ma-in w-full" value="${esc(d.t)}" aria-label="Time">
+      <p class="ma-lbl">Days</p>
+      <div class="flex gap-1.5 justify-between">${MA_DAYS.map((x, i) => `<button class="ma-day ${d.d.includes(i) ? 'on' : ''}" data-day="${i}" aria-pressed="${d.d.includes(i)}" aria-label="${MA_DAYN[i]}">${x}</button>`).join('')}</div>
+      <div class="flex gap-3 mt-2 text-xs font-semibold"><button class="text-blue-400" data-days="0123456">Every day</button><button class="text-blue-400" data-days="12345">Weekdays</button><button class="text-blue-400" data-days="06">Weekends</button></div>
+      <p class="ma-lbl">What to send</p>
+      <select id="maSend" class="ma-in w-full">${MA_SEND.map(w => `<option value="${w[0]}" ${w[0] === d.s ? 'selected' : ''}>${w[1]}</option>`).join('')}</select>
+    `}
+    <p class="ma-lbl">Your message <span class="font-normal text-zinc-500">(optional)</span></p>
+    <input id="maMsg" class="ma-in w-full" value="${esc(d.msg || '')}" maxlength="160" placeholder="${cond ? 'e.g. Grab a hoodie!' : 'e.g. Charge your phone 🔋'}" aria-label="Your message">
+    <p class="ma-preview" id="maPrev"></p>`;
+  maPreview();
+  const body = $('#maBody');
+  body.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => { readEditor(); draft.k = b.dataset.kind; renderEditor(); });
+  body.querySelectorAll('[data-emo]').forEach(b => b.onclick = () => { $('#maEmoji').value = b.dataset.emo; maPreview(); });
+  body.querySelectorAll('[data-day]').forEach(b => b.onclick = () => { readEditor(); const i = +b.dataset.day; draft.d = draft.d.includes(i) ? draft.d.filter(x => x !== i) : [...draft.d, i].sort(); renderEditor(); });
+  body.querySelectorAll('[data-days]').forEach(b => b.onclick = () => { readEditor(); draft.d = b.dataset.days.split('').map(Number); renderEditor(); });
+  body.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { readEditor(); draft.c.splice(+b.dataset.rm, 1); renderEditor(); });
+  body.querySelectorAll('.ma-m').forEach(sel => sel.onchange = () => { readEditor(); const i = +sel.closest('.ma-cond').dataset.i, m = MA_M[sel.value]; draft.c[i].v = draft.u === 'C' ? m[4] : m[3]; if (draft.c[i].o === 'btw') draft.c[i].v2 = +(draft.c[i].v + m[5] * 10).toFixed(2); renderEditor(); });
+  body.querySelectorAll('.ma-o').forEach(sel => sel.onchange = () => { readEditor(); const i = +sel.closest('.ma-cond').dataset.i, m = MA_M[draft.c[i].m]; if (sel.value === 'btw' && !isFinite(draft.c[i].v2)) draft.c[i].v2 = +((draft.c[i].v || 0) + m[5] * 10).toFixed(2); renderEditor(); });
+  const add = $('#maAddC'); if (add) add.onclick = () => { readEditor(); draft.c.push({ m: 'rain', o: 'lt', v: 20 }); renderEditor(); };
+  body.querySelectorAll('input,select').forEach(el => el.addEventListener('input', maPreview));
+  $('#maDel').classList.toggle('hidden', !!draft._new);
+}
+function maPreview() {
+  readEditor(); const d = draft, el = $('#maPrev'); if (!el) return;
+  let t;
+  if (d.k === 'c') t = `Pings you when ${(d.c || []).map(c => condTxt(c, d.u).toLowerCase()).join(' and ')} ${({ now: 'right now', h3: 'in the next 3 hours', h6: 'in the next 6 hours', h12: 'in the next 12 hours', today: 'later today', tom: 'tomorrow (heads-up after 5 PM)' })[d.w]}, ${d.r === 'flip' ? 'every time it starts' : 'once a day max'}, ${t12(d.h[0])}–${t12(d.h[1])}.`;
+  else t = `Pings you at ${t12(d.t)}, ${daysTxt(d.d).toLowerCase()}, with ${(MA_SEND.find(x => x[0] === d.s) || [, ''])[1].toLowerCase()}.`;
+  el.innerHTML = `<i class="ph-fill ph-info text-blue-400"></i> ${esc(t)}`;
+}
+function validDraft() {
+  const d = draft;
+  if (!d.n) d.n = d.k === 's' ? `${(MA_SEND.find(x => x[0] === d.s) || [, 'My alert'])[1]} ${t12(d.t)}` : (MA_M[d.c[0]?.m]?.[1] || 'My alert') + ' alert';
+  if (d.k === 'c') {
+    for (const c of d.c) if (!isFinite(c.v) || (c.o === 'btw' && !isFinite(c.v2))) return 'Put a number in every box.';
+  } else if (!d.d.length) return 'Pick at least one day.';
+  if (d.k === 's' && d.s === 'msg' && !d.msg) return 'Type the message you want to get.';
+  return '';
+}
+function commitDraft() {
+  readEditor(); const err = validDraft(); if (err) { const e = $('#maErr'); e.textContent = err; e.classList.remove('hidden'); return null; }
+  const a = { ...draft }; delete a._new;
+  if (a.k === 'c') { delete a.t; delete a.d; delete a.s; } else { delete a.c; delete a.w; delete a.r; delete a.h; }
+  if (!a.msg) delete a.msg;
+  const i = maList.findIndex(x => x.id === a.id);
+  if (i >= 0) { if (maList[i].preset && JSON.stringify(maList[i]) !== JSON.stringify(a)) a.preset = maList[i].preset; maList[i] = a; }
+  else { if (maList.length >= 20) { const e = $('#maErr'); e.textContent = 'That\'s 20 alerts, the max. Delete one first.'; e.classList.remove('hidden'); return null; } maList.push(a); }
+  return a;
+}
+function initAlerts() {
+  if (!$('#maList')) return;
+  const sheet = document.createElement('div');
+  sheet.id = 'maSheet'; sheet.className = 'ma-sheet hidden'; sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-modal', 'true'); sheet.setAttribute('aria-labelledby', 'maTitle');
+  sheet.innerHTML = `<div class="ma-panel">
+    <div class="flex items-center justify-between mb-3"><h3 id="maTitle" class="text-base font-bold text-zinc-100">New alert</h3><button id="maX" class="ma-ico" aria-label="Close"><i class="ph ph-x"></i></button></div>
+    <div id="maBody"></div>
+    <p id="maErr" class="hidden text-xs text-amber-400 mt-3"></p>
+    <div class="flex flex-wrap gap-2 mt-4"><button id="maSaveBtn" class="btn-primary !py-2.5 !px-5 flex-1 flex items-center justify-center gap-2"><i class="ph-bold ph-check"></i> Save</button><button id="maTestBtn" class="btn-soft"><i class="ph ph-paper-plane-tilt"></i> Save + test</button></div>
+    <button id="maDel" class="w-full text-center text-xs font-semibold text-red-400 mt-4 py-2"><i class="ph ph-trash"></i> Delete this alert</button>
+  </div>`;
+  document.body.appendChild(sheet);
+  sheet.onclick = e => { if (e.target === sheet) closeEditor(); };
+  $('#maX').onclick = closeEditor;
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && draft) closeEditor(); });
+  $('#maSaveBtn').onclick = () => { const a = commitDraft(); if (!a) return; closeEditor(); maSave(); };
+  $('#maTestBtn').onclick = async () => { const a = commitDraft(); if (!a) return; closeEditor(); await maSave(true); maTest(a.id); };
+  $('#maDel').onclick = () => { if (!draft) return; const n = draft.n || 'this alert'; if (!confirm(`Delete "${n}"?`)) return; maList = maList.filter(x => x.id !== draft.id); closeEditor(); maSave(true).then(() => maStatus(`Deleted "${n}".`, 'ok')); };
+  $('#maNew').onclick = () => { if (maList.length >= 20) { maStatus('That\'s 20 alerts, the max. Delete one first.', 'warn'); return; } openEditor(null); };
+  $('#maPresets').onclick = e => { const b = e.target.closest('[data-p]'); if (b) addPreset(b.dataset.p); };
+  $('#maList').onclick = e => {
+    const ed = e.target.closest('[data-edit]'), ts = e.target.closest('[data-test]');
+    if (ed) openEditor(ed.dataset.edit); else if (ts) maTest(ts.dataset.test);
+  };
+  $('#maList').onchange = e => { const t = e.target.closest('[data-tog]'); if (!t) return; const a = maList.find(x => x.id === t.dataset.tog); if (!a) return; a.on = t.checked; maSave(true).then(ok => maStatus(`${a.n} is ${a.on ? 'on' : 'off'}${ok ? ' ✅' : ''}.`, ok ? 'ok' : 'warn')); };
+  renderAlerts();
+}
+
 /* ---------- boot ---------- */
 function boot() {
   initPWA(); bindShareCard(); jump();
+  try { initAlerts(); } catch (e) { console.warn('my alerts', e); }
   window.addEventListener('hashchange', jump);
   let first = true;
   document.addEventListener('nx:data', () => {
