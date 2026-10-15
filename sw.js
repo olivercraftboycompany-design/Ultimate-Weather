@@ -1,5 +1,5 @@
 /* NEXUS Ultimate service worker. Bump VERSION when you change files so phones get the update. */
-const VERSION = 'nexus-v4';
+const VERSION = 'nexus-v5';
 importScripts('push-box.js');
 
 const SHELL = [

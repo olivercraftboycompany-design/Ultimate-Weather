@@ -86,6 +86,7 @@ async function push(state, sid, n, opts = {}) {
   const s = state.subs[sid]; if (!s) return false;
   const body = JSON.stringify({ ...n, ts: NOW });
   if (DRY) { log('[dry] would push to', sid, body); return true; }
+  if (s.sub && s.sub.app) return pushApp(s, sid, n, body, opts);
   try {
     const r = await webpush.sendNotification(s.sub, body, { TTL: opts.ttl ?? 3600, urgency: opts.urgency || 'normal', topic: (n.tag || 'nexus').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) });
     log(`pushed "${n.title}" to ${sid} → ${r.statusCode}`); s.lastOk = NOW; s.fails = 0; return true;
@@ -95,6 +96,30 @@ async function push(state, sid, n, opts = {}) {
     else { s.fails = (s.fails || 0) + 1; }
     return false;
   }
+}
+
+/* ---------- 2b) Android app installs: no web push inside the app, so it gets its own ntfy topic.
+   The notification is sealed with AES-256-GCM using a key only the app (and this sender, via the sealed
+   subscription) knows; the app checks its topic in the background and shows a native notification. ---------- */
+const APP_TOPIC_RE = /^oapp-[A-Za-z0-9_-]{24,60}$/;
+export function sealForApp(keyB64u, json) {
+  const key = b64u(keyB64u); if (key.length !== 32) throw new Error('bad app key');
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([c.update(Buffer.from(json, 'utf8')), c.final(), c.getAuthTag()]);
+  return 'oaa1.' + iv.toString('base64url') + '.' + ct.toString('base64url');
+}
+async function pushApp(s, sid, n, body, opts) {
+  const a = s.sub.app || {};
+  if (!APP_TOPIC_RE.test(String(a.topic || '')) || !a.key) { log('app subscription malformed, removing', sid); return false; }
+  const prio = opts.urgency === 'high' ? 5 : n.silent ? 2 : 3;
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 15000);
+  try {
+    const r = await fetch('https://ntfy.sh/' + a.topic, { method: 'POST', body: sealForApp(a.key, JSON.stringify({ ...JSON.parse(body), exp: NOW + (opts.ttl ?? 3600) * 1000 })), headers: { 'X-Priority': String(prio), 'User-Agent': UA }, signal: ac.signal });
+    if (!r.ok) throw Object.assign(new Error('ntfy ' + r.status), { statusCode: r.status });
+    log(`pushed "${n.title}" to app ${sid} -> ${r.status}`); s.lastOk = NOW; s.fails = 0; return true;
+  } catch (e) {
+    log(`app push to ${sid} failed: ${e.message}`); s.fails = (s.fails || 0) + 1; return false;
+  } finally { clearTimeout(t); }
 }
 
 /* ---------- 3) weather checks per subscriber ---------- */
